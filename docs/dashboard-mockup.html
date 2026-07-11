@@ -87,6 +87,9 @@
   .chip.buy{color:var(--up-text);background:rgba(42,168,118,.14);border:1px solid rgba(42,168,118,.5)}
   .chip.sell{color:var(--down-text);background:rgba(224,85,96,.14);border:1px solid rgba(224,85,96,.5)}
   .chip.skip{color:var(--ink2);background:rgba(147,161,181,.1);border:1px solid var(--line)}
+  .chip.risk{color:#d7a94e;background:rgba(187,138,38,.13);border:1px solid rgba(187,138,38,.5)}
+  .chip.advice{color:#9b87e8;background:rgba(155,135,232,.12);border:1px solid rgba(155,135,232,.45)}
+  .thought .agent{font-size:10.5px;color:var(--muted);letter-spacing:.04em}
   .thought .t{margin-left:auto;font-size:11px;color:var(--muted)}
   .thought p{margin:0;font-size:12.5px;color:var(--ink2)}
   .thought .conf{font-size:11px;color:var(--muted);margin-top:6px}
@@ -118,6 +121,11 @@
   .imp.lo{color:var(--ink2);background:rgba(147,161,181,.08);border:1px solid var(--line)}
   .event .src{font-size:11px;color:var(--muted)}
   .event .t{margin-left:auto;font-size:11px;color:var(--muted)}
+  .sched{border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:4px}
+  .sched-row{display:flex;align-items:center;gap:8px;padding:5px 2px;font-size:12px}
+  .sched-row .sname{color:var(--ink2)}
+  .sched-row .swin{font-size:10px;color:#d7a94e;border:1px solid rgba(187,138,38,.5);border-radius:999px;padding:0 6px;white-space:nowrap}
+  .sched-row .t{margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap}
   .note{color:var(--muted);font-size:12px;text-align:center}
 
   @media (max-width:960px){
@@ -205,6 +213,7 @@
     </section>
     <section class="panel events">
       <div class="panel-head"><h2>ニュース・イベント</h2><span class="meta">要人発言・経済指標(デモ)</span></div>
+      <div id="schedList" class="sched" aria-label="経済指標カレンダー"></div>
       <ul class="feed-list" id="eventList"></ul>
     </section>
   </div>
@@ -599,6 +608,14 @@
       '直近 2 連敗のため、ルールに基づきポジションサイズを半分に制限中。基準を満たすシグナルが出るまで待機します。',
       '恐怖指数(VIX)が上昇しドル指数も強含み。リスクオフの資金フローが警戒されるため、新規エントリーを見送ります。',
     ],
+    risk: [
+      '取引頻度が設定上限に近づいています。以降のシグナルはポジションサイズを段階的に制限します。',
+    ],
+    advice: [
+      '本日の地合い: VIX は低位、株先物も堅調でリスクオンが継続。トレンドフォロー優位の環境で、現在のポジションサイズ設定は適切と見ています。',
+      '直近の判断ログをレビューしました。見送り判断の質は良好ですが、利確がやや早い傾向があります。目標利幅の見直しを次回の日次レビューで提案します。',
+      'ゴールドの軟調とドル指数の横ばいから、資金は依然リスク資産に向かっています。BTC の押し目は拾いやすい地合いという見立てです。',
+    ],
   };
   const timeStr = () => new Date().toLocaleTimeString('ja-JP', { hour12: false, timeZone: 'Asia/Tokyo' });
   function prependCapped(ul, li, max) {
@@ -607,14 +624,25 @@
   }
   // opts.system: オペレーター/システム由来のカード(確信度・リスクゲート表記なし)
   // opts.gate  : リスクゲートの結果表記(省略時 '通過')
+  // opts.agent : 発言エージェント名の上書き(省略時は kind から自動)
+  const KIND_META = {
+    buy:    { label: '買い',   chip: 'buy',    agent: 'トレーダー' },
+    sell:   { label: '売り',   chip: 'sell',   agent: 'トレーダー' },
+    skip:   { label: '見送り', chip: 'skip',   agent: 'トレーダー' },
+    risk:   { label: '抑制',   chip: 'risk',   agent: 'リスク管理' },
+    advice: { label: '所感',   chip: 'advice', agent: '相談役' },
+    system: { label: 'システム', chip: 'skip',  agent: '' },
+  };
   function pushThought(kind, extra, opts = {}) {
     const li = document.createElement('li');
     li.className = 'thought';
-    const label = { buy: '買い', sell: '売り', skip: '見送り', system: 'システム' }[kind];
+    const meta = KIND_META[kind];
     const pool = REASONS[kind];
-    const footer = opts.system ? '' :
+    const agent = opts.agent ?? meta.agent;
+    const footer = (opts.system || kind === 'advice') ? '' :
       `<div class="conf">確信度 <b class="num">${58 + Math.floor(Math.random() * 34)}%</b> · リスクゲート: ${opts.gate || '通過'}</div>`;
-    li.innerHTML = `<div class="row1"><span class="chip ${kind === 'system' ? 'skip' : kind}">${label}</span>
+    li.innerHTML = `<div class="row1"><span class="chip ${meta.chip}">${meta.label}</span>
+      ${agent ? `<span class="agent">${agent}</span>` : ''}
       <span class="t num">${timeStr()}</span></div>
       <p>${extra || pool[Math.floor(Math.random() * pool.length)]}</p>${footer}`;
     prependCapped($('thoughtLog'), li, 12);
@@ -656,7 +684,7 @@
     const r = Math.random();
     if (!halted && btc === 0 && r < 0.45) {          // エントリー
       if (todayPnl <= -RISK.dailyLoss) {
-        pushThought('skip', `日次損失が上限(${yen(RISK.dailyLoss)})に到達しているため、リスクゲートが新規エントリーを拒否しました。本日は決済のみ行います。`, { gate: '発動(日次損失上限)' });
+        pushThought('risk', `日次損失が上限(${yen(RISK.dailyLoss)})に到達しているため、新規エントリーを拒否しました。本日は決済のみ行います。`, { gate: '発動(日次損失上限)' });
         return;
       }
       const notional = 20_000 + Math.random() * (RISK.perTrade - 22_000); // 1取引上限の範囲内
@@ -675,6 +703,25 @@
       pushThought('skip');
     }
     refresh();
+  }
+
+  /* ── 経済カレンダー(スケジュール管理。デモ)── */
+  const SCHED = [
+    { label: '米雇用統計(NFP)', imp: 'hi',  at: t0 + 2.2 * 3600_000, window: '前後30分 取引抑制' },
+    { label: 'FOMC 議事要旨',    imp: 'mid', at: t0 + 8.5 * 3600_000, window: '' },
+    { label: '米CPI(7月)',      imp: 'hi',  at: t0 + 26 * 3600_000,  window: '前後30分 取引抑制' },
+  ];
+  const cd = ms => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  function renderSched() {
+    $('schedList').innerHTML = SCHED.map(ev => {
+      const t = new Date(ev.at).toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+      return `<div class="sched-row"><span class="imp ${ev.imp}">${ev.imp === 'hi' ? '高' : '中'}</span>
+        <span class="sname">${ev.label}</span>${ev.window ? `<span class="swin">${ev.window}</span>` : ''}
+        <span class="t num">${t} · あと ${cd(ev.at - Date.now())}</span></div>`;
+    }).join('');
   }
 
   /* ── 関連指標(恐怖指数・ゴールド等。デモ)── */
@@ -725,8 +772,8 @@
       <span class="src">${ev.src}</span><span class="t num">${timeStr()}</span></div>
       <p>${ev.text}</p>`;
     prependCapped($('eventList'), li, 10);
-    // 高インパクトはイベントドリブン判断: 定期サイクルを待たず防御反応を思考ログへ
-    if (ev.react && !halted) setTimeout(() => pushThought('skip', ev.react, { gate: 'イベント警戒' }), 1600);
+    // 高インパクトはイベントドリブン判断: 定期サイクルを待たずリスク管理エージェントが防御反応
+    if (ev.react && !halted) setTimeout(() => pushThought('risk', ev.react, { gate: 'イベント警戒' }), 1600);
   }
 
   /* ── 緊急停止 ── */
@@ -767,5 +814,13 @@
   setTimeout(agentCycle, 2500);
   setInterval(pushEvent, 16000);
   setTimeout(pushEvent, 5000);
+  renderSched();
+  setInterval(renderSched, 1000);
+  setInterval(() => { if (!halted) pushThought('advice'); }, 42000);
+  setTimeout(() => { if (!halted) pushThought('advice'); }, 13000);
+  // カレンダー連動の抑制デモ(実装では発表 30 分前に自動発動)
+  setTimeout(() => { if (!halted) pushThought('risk',
+    '経済カレンダー連動(デモ): 米雇用統計(NFP)の発表が近づいた際は、発表前後 30 分の新規エントリーを自動で抑制し、既存ポジションのサイズ縮小を検討します。',
+    { gate: '発動(指標前抑制)' }); }, 30000);
 })();
 </script>
