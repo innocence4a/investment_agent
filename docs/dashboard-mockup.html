@@ -65,13 +65,19 @@
   .tf:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
   .chart-wrap{position:relative}
   canvas{display:block;width:100%}
+  #rsiChart,#macdChart{margin-top:8px;border-top:1px solid var(--line);padding-top:6px}
+  .macro{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+  .mtile{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 14px;min-width:0}
+  .mtile .label{font-size:10.5px;letter-spacing:.07em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mtile .value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:15px;font-weight:700;margin-top:2px}
+  .mtile .sub{font-size:11px;margin-top:1px;font-family:var(--mono);font-variant-numeric:tabular-nums}
   .tooltip{position:absolute;pointer-events:none;background:var(--surface-2);border:1px solid var(--line);
            border-radius:8px;padding:8px 10px;font-size:12px;color:var(--ink2);display:none;z-index:5;
            box-shadow:0 8px 24px rgba(0,0,0,.4);white-space:nowrap}
   .tooltip .num{color:var(--ink)}
 
   /* ── 思考ログ ────────────────────────── */
-  .thoughts{max-height:604px}
+  .thoughts{max-height:790px}
   .thought-list{list-style:none;margin:0;padding:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;flex:1}
   .thought{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;
            animation:slidein .35s ease}
@@ -116,6 +122,7 @@
 
   @media (max-width:960px){
     .kpis{grid-template-columns:repeat(2,1fr)}
+    .macro{grid-template-columns:repeat(3,1fr)}
     .grid,.bottom{grid-template-columns:1fr}
     .thoughts{max-height:420px}
   }
@@ -140,6 +147,8 @@
 
   <div class="halt-banner">⏸ 緊急停止中 — 新規エントリーを停止しています(既存ポジションの決済監視は継続)。「再開する」ボタンで復帰できます。</div>
 
+  <section class="macro" id="macroStrip" aria-label="関連指標"></section>
+
   <section class="kpis" aria-label="サマリー">
     <div class="kpi"><div class="label">総資産</div><div class="value num" id="kEquity">¥1,000,000</div><div class="sub num" id="kEquitySub">開始 ¥1,000,000</div></div>
     <div class="kpi"><div class="label">累計損益</div><div class="value num pos" id="kPnl">+¥0</div><div class="sub num pos" id="kPnlPct">+0.00%</div></div>
@@ -158,9 +167,11 @@
           <span class="meta num" id="lastPrice" style="margin-left:auto"></span>
         </div>
         <div class="chart-wrap">
-          <canvas id="priceChart" height="300" aria-label="BTC/JPY 価格チャート(売買マーカー付き)"></canvas>
+          <canvas id="priceChart" height="300" aria-label="BTC/JPY 価格チャート(売買マーカー・移動平均線付き)"></canvas>
           <div class="tooltip" id="tip"></div>
         </div>
+        <canvas id="rsiChart" height="64" aria-label="RSI(14)"></canvas>
+        <canvas id="macdChart" height="76" aria-label="MACD(12,26,9)"></canvas>
       </section>
       <section class="panel">
         <div class="panel-head">
@@ -220,20 +231,22 @@
   const t0 = Date.now();
 
   /* ── タイムフレーム(ボラティリティは √(分数比) でスケール、ticks はデモ圧縮の確定間隔) ── */
+  const VIEW = 24;      // X軸の基準線 24 本 = 表示幅 24 本足(月足なら 2 年分、1時間足なら 24 時間分)
+  const SEED = 160;     // MA99 が表示範囲全体で計算できるだけの履歴
   const TFS = [
-    { key: '5m', label: '5分',   ticks: 2,  vol: 9_000 },
-    { key: '1h', label: '1時間', ticks: 5,  vol: 31_000 },
-    { key: '4h', label: '4時間', ticks: 8,  vol: 62_000 },
-    { key: '1d', label: '日足',  ticks: 12, vol: 153_000 },
-    { key: '1w', label: '週足',  ticks: 20, vol: 404_000 },
-    { key: '1M', label: '月足',  ticks: 30, vol: 837_000 },
+    { key: '5m', label: '5分',   ticks: 2,  vol: 9_000,   mins: 5 },
+    { key: '1h', label: '1時間', ticks: 5,  vol: 31_000,  mins: 60 },
+    { key: '4h', label: '4時間', ticks: 8,  vol: 62_000,  mins: 240 },
+    { key: '1d', label: '日足',  ticks: 12, vol: 153_000, mins: 1440 },
+    { key: '1w', label: '週足',  ticks: 20, vol: 404_000, mins: 10080 },
+    { key: '1M', label: '月足',  ticks: 30, vol: 837_000, mins: 43200 },
   ];
   let activeTf = TFS[0];
 
   function seedSeries(vol) {
     const arr = [];
     let p = price;
-    for (let i = 0; i < 70; i++) {
+    for (let i = 0; i < SEED; i++) {
       const o = p, c = o + (Math.random() - 0.495) * vol;
       arr.push({ o, c, h: Math.max(o, c) + Math.random() * vol * 0.45, l: Math.min(o, c) - Math.random() * vol * 0.45 });
       p = c;
@@ -246,6 +259,46 @@
   // 資産は取引 0 回で開始するため開始資金のフラットな線
   equity = Array(70).fill(START);
 
+  /* ── インジケーター計算 ── */
+  function sma(vals, n) {
+    const out = Array(vals.length).fill(null);
+    let s = 0;
+    for (let i = 0; i < vals.length; i++) {
+      s += vals[i];
+      if (i >= n) s -= vals[i - n];
+      if (i >= n - 1) out[i] = s / n;
+    }
+    return out;
+  }
+  function ema(vals, n) {
+    const out = Array(vals.length).fill(null);
+    const k = 2 / (n + 1);
+    let e = null;
+    for (let i = 0; i < vals.length; i++) { e = e === null ? vals[i] : vals[i] * k + e * (1 - k); out[i] = e; }
+    return out;
+  }
+  function rsi(vals, n = 14) {
+    const out = Array(vals.length).fill(null);
+    let ag = 0, al = 0;
+    for (let i = 1; i < vals.length; i++) {
+      const d = vals[i] - vals[i - 1], g = Math.max(d, 0), l = Math.max(-d, 0);
+      if (i <= n) {
+        ag += g; al += l;
+        if (i === n) { ag /= n; al /= n; out[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al)); }
+      } else {
+        ag = (ag * (n - 1) + g) / n; al = (al * (n - 1) + l) / n;
+        out[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al));
+      }
+    }
+    return out;
+  }
+  function macd(vals) {
+    const e12 = ema(vals, 12), e26 = ema(vals, 26);
+    const line = vals.map((_, i) => e12[i] - e26[i]);
+    const signal = ema(line, 9);
+    return { line, signal, hist: line.map((v, i) => v - signal[i]) };
+  }
+
   /* ── 時計・稼働時間 ── */
   setInterval(() => {
     $('clock').textContent = timeStr() + ' JST';
@@ -256,7 +309,72 @@
   /* ── チャート描画(ローソク足) ── */
   const pc = $('priceChart'), pctx = pc.getContext('2d');
   const ec = $('equityChart'), ectx = ec.getContext('2d');
+  const rc = $('rsiChart'), rctx = rc.getContext('2d');
+  const mc = $('macdChart'), mctx = mc.getContext('2d');
   let hoverIdx = -1;
+
+  /* ── RSI / MACD サブチャート ── */
+  function drawInd() {
+    const closes = activeTf.series.map(k => k.c);
+    { // RSI(14)
+      const { w, h } = fit(rc);
+      const pad = { l: 8, r: 86, t: 6, b: 6 };
+      const bw = (w - pad.l - pad.r) / VIEW;
+      const vals = rsi(closes).slice(-VIEW);
+      const y = v => pad.t + (100 - v) / 100 * (h - pad.t - pad.b);
+      rctx.clearRect(0, 0, w, h);
+      rctx.fillStyle = 'rgba(92,142,232,.06)';
+      rctx.fillRect(pad.l, y(70), w - pad.l - pad.r, y(30) - y(70));
+      rctx.strokeStyle = C.grid; rctx.setLineDash([3, 3]);
+      [30, 70].forEach(v => { rctx.beginPath(); rctx.moveTo(pad.l, y(v)); rctx.lineTo(w - pad.r, y(v)); rctx.stroke(); });
+      rctx.setLineDash([]);
+      rctx.strokeStyle = '#d7a94e'; rctx.lineWidth = 1.5;
+      rctx.beginPath(); let st = false;
+      vals.forEach((v, i) => {
+        if (v === null) return;
+        const x = pad.l + i * bw + bw / 2;
+        st ? rctx.lineTo(x, y(v)) : (rctx.moveTo(x, y(v)), st = true);
+      });
+      rctx.stroke();
+      rctx.font = '10.5px ui-monospace,Menlo,monospace'; rctx.textAlign = 'left';
+      rctx.fillStyle = C.ink2; rctx.fillText('RSI(14)', pad.l + 4, pad.t + 9);
+      const cur = vals[vals.length - 1];
+      if (cur !== null) {
+        rctx.fillStyle = cur >= 70 ? C.downT : cur <= 30 ? C.upT : C.ink2;
+        rctx.fillText(cur.toFixed(1), w - pad.r + 8, y(cur) + 4);
+      }
+    }
+    { // MACD(12,26,9)
+      const { w, h } = fit(mc);
+      const pad = { l: 8, r: 86, t: 6, b: 6 };
+      const bw = (w - pad.l - pad.r) / VIEW;
+      const m = macd(closes);
+      const line = m.line.slice(-VIEW), sig = m.signal.slice(-VIEW), hist = m.hist.slice(-VIEW);
+      const ex = Math.max(...[...line, ...sig, ...hist].filter(v => v !== null).map(Math.abs), 1);
+      const y = v => pad.t + (ex - v) / (2 * ex) * (h - pad.t - pad.b);
+      mctx.clearRect(0, 0, w, h);
+      mctx.strokeStyle = C.grid;
+      mctx.beginPath(); mctx.moveTo(pad.l, y(0)); mctx.lineTo(w - pad.r, y(0)); mctx.stroke();
+      hist.forEach((v, i) => {
+        if (v === null) return;
+        const x = pad.l + i * bw + bw / 2, y0 = y(0), y1 = y(v);
+        mctx.fillStyle = v >= 0 ? 'rgba(42,168,118,.5)' : 'rgba(224,85,96,.5)';
+        mctx.fillRect(x - bw * 0.28, Math.min(y0, y1), bw * 0.56, Math.max(1, Math.abs(y1 - y0)));
+      });
+      [[line, C.accent], [sig, '#d7a94e']].forEach(([vals, col]) => {
+        mctx.strokeStyle = col; mctx.lineWidth = 1.5;
+        mctx.beginPath(); let st = false;
+        vals.forEach((v, i) => {
+          if (v === null) return;
+          const x = pad.l + i * bw + bw / 2;
+          st ? mctx.lineTo(x, y(v)) : (mctx.moveTo(x, y(v)), st = true);
+        });
+        mctx.stroke();
+      });
+      mctx.font = '10.5px ui-monospace,Menlo,monospace'; mctx.textAlign = 'left';
+      mctx.fillStyle = C.ink2; mctx.fillText('MACD(12,26,9)', pad.l + 4, pad.t + 9);
+    }
+  }
 
   function fit(cv) {
     if (!cv._h) cv._h = +cv.getAttribute('height'); // 論理高さは初回に固定(DPR 反映後の height 属性を再読込すると倍々に肥大する)
@@ -267,11 +385,27 @@
     return { w, h };
   }
 
+  const MAS = [
+    { n: 7,  color: '#d7a94e' },
+    { n: 25, color: '#5c8ee8' },
+    { n: 99, color: '#9b87e8' },
+  ];
+  const tfTimeLabel = (t) => {
+    const d = new Date(t);
+    if (activeTf.mins < 1440) return d.toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+    if (activeTf.mins < 43200) return `${d.getMonth() + 1}/${d.getDate()}`;
+    return `${String(d.getFullYear()).slice(2)}/${d.getMonth() + 1}`;
+  };
+
   function drawPrice() {
     const { w, h } = fit(pc);
-    const view = activeTf.series.slice(-70);
-    const pad = { l: 8, r: 86, t: 10, b: 20 };
-    const lo = Math.min(...view.map(c => c.l)), hi = Math.max(...view.map(c => c.h));
+    const s = activeTf.series;
+    const view = s.slice(-VIEW);
+    const pad = { l: 8, r: 86, t: 10, b: 24 };
+    const closes = s.map(k => k.c);
+    const maLines = MAS.map(ma => sma(closes, ma.n).slice(-VIEW));
+    const maVals = maLines.flat().filter(v => v !== null);
+    const lo = Math.min(...view.map(c => c.l), ...maVals), hi = Math.max(...view.map(c => c.h), ...maVals);
     const y = v => pad.t + (hi - v) / (hi - lo) * (h - pad.t - pad.b);
     const bw = (w - pad.l - pad.r) / view.length;
 
@@ -284,6 +418,41 @@
       pctx.beginPath(); pctx.moveTo(pad.l, gy); pctx.lineTo(w - pad.r, gy); pctx.stroke();
       pctx.fillText(yen(v), w - pad.r + 8, gy + 4);
     }
+    // X軸: 基準線 24 本(1本足ごと)+ 時刻ラベル(4本ごと)
+    const base = s.length - view.length;
+    const now = Date.now(), tfMs = activeTf.mins * 60_000;
+    pctx.textAlign = 'center';
+    view.forEach((_, i) => {
+      const x = pad.l + i * bw + bw / 2;
+      pctx.strokeStyle = C.grid; pctx.globalAlpha = 0.55;
+      pctx.beginPath(); pctx.moveTo(x, pad.t); pctx.lineTo(x, h - pad.b); pctx.stroke();
+      pctx.globalAlpha = 1;
+      if ((base + i) % 4 === 0) {
+        pctx.fillStyle = C.muted;
+        pctx.fillText(tfTimeLabel(now - (view.length - 1 - i) * tfMs), x, h - 8);
+      }
+    });
+    // 移動平均線 3 本(MA7/MA25/MA99)
+    MAS.forEach((ma, mi) => {
+      const line = maLines[mi];
+      pctx.strokeStyle = ma.color; pctx.lineWidth = 1.5;
+      pctx.beginPath();
+      let started = false;
+      line.forEach((v, i) => {
+        if (v === null) return;
+        const x = pad.l + i * bw + bw / 2;
+        if (!started) { pctx.moveTo(x, y(v)); started = true; } else pctx.lineTo(x, y(v));
+      });
+      pctx.stroke();
+    });
+    // MA 凡例(値はテキストトークン、色はマーカー)
+    pctx.textAlign = 'left'; pctx.font = '10.5px ui-monospace,Menlo,monospace';
+    let lx = pad.l + 4;
+    MAS.forEach(ma => {
+      pctx.fillStyle = ma.color; pctx.fillRect(lx, pad.t + 2, 8, 2.5);
+      pctx.fillStyle = C.ink2; pctx.fillText(`MA${ma.n}`, lx + 11, pad.t + 7);
+      lx += 52;
+    });
     // ローソク
     view.forEach((c, i) => {
       const x = pad.l + i * bw + bw / 2, up = c.c >= c.o;
@@ -295,7 +464,6 @@
     });
     // 売買マーカー(▲▼ + 記号で方向を二重符号化)。取引は 5分足基準のため他の足では非表示
     if (activeTf === TFS[0]) {
-      const base = candles.length - view.length;
       markers.filter(m => m.i >= base).forEach(m => {
         const i = m.i - base, c = view[i]; if (!c) return;
         const x = pad.l + i * bw + bw / 2;
@@ -418,6 +586,7 @@
       '5分足の RSI が 31 まで低下した後に反発を確認。直近サポートを維持しており、短期リバウンド狙いで小口エントリーします。',
       '出来高を伴って直近高値をブレイク。モメンタム継続と判断し、リスク上限内でロングを追加します。',
       '急落後の出来高減衰と下ヒゲ連続を確認。売り圧力の枯れと判断し、打診買いを入れます。',
+      'ゴールドが軟調な一方で株先物が堅調。リスクオンの資金フローが観測されるため、BTC への追い風と判断して小口エントリーします。',
     ],
     sell: [
       '目標利幅 +0.4% に到達。上値には厚い売り板が控えており、ルール通り利確します。',
@@ -428,6 +597,7 @@
       '米 CPI 発表を控えボラティリティ拡大が見込まれるため、新規エントリーは見送り。既存ポジションのみ監視します。',
       'レンジ中央で優位性のあるセットアップがありません。エッジのない取引はしない方針に従い、様子見します。',
       '直近 2 連敗のため、ルールに基づきポジションサイズを半分に制限中。基準を満たすシグナルが出るまで待機します。',
+      '恐怖指数(VIX)が上昇しドル指数も強含み。リスクオフの資金フローが警戒されるため、新規エントリーを見送ります。',
     ],
   };
   const timeStr = () => new Date().toLocaleTimeString('ja-JP', { hour12: false, timeZone: 'Asia/Tokyo' });
@@ -477,7 +647,7 @@
     });
     equity.push(equityNow());
     if (equity.length > 600) equity.shift();
-    drawPrice(); drawEquity(); refresh();
+    drawPrice(); drawInd(); drawEquity(); refresh();
     if (lastMouse) resolveHover(lastMouse.x, lastMouse.y);
   }
 
@@ -505,6 +675,32 @@
       pushThought('skip');
     }
     refresh();
+  }
+
+  /* ── 関連指標(恐怖指数・ゴールド等。デモ)── */
+  const MACRO = [
+    { label: 'FEAR & GREED', v: 62, step: 1.5, fmt: v => Math.round(v),
+      sub: v => v >= 75 ? '極端な強欲' : v >= 55 ? '強欲' : v >= 45 ? '中立' : v >= 25 ? '恐怖' : '極端な恐怖' },
+    { label: '恐怖指数 VIX', v: 18.4, step: 0.25, fmt: v => v.toFixed(1) },
+    { label: 'ゴールド USD/oz', v: 3324, step: 5, fmt: v => Math.round(v).toLocaleString('en-US') },
+    { label: 'S&P500 先物', v: 6128, step: 6, fmt: v => Math.round(v).toLocaleString('en-US') },
+    { label: 'ドル指数 DXY', v: 103.4, step: 0.08, fmt: v => v.toFixed(1) },
+    { label: '米10年金利', v: 4.23, step: 0.015, fmt: v => v.toFixed(2) + '%' },
+  ];
+  MACRO.forEach(m => { m.v0 = m.v; });
+  function renderMacro() {
+    $('macroStrip').innerHTML = MACRO.map(m => {
+      const d = (m.v - m.v0) / m.v0 * 100;
+      const cls = d >= 0 ? 'pos' : 'neg';
+      const sub = m.sub ? m.sub(m.v) : `${d >= 0 ? '▲' : '▼'} ${Math.abs(d).toFixed(2)}%`;
+      return `<div class="mtile"><div class="label">${m.label}</div>
+        <div class="value">${m.fmt(m.v)}</div>
+        <div class="sub ${m.sub ? '' : cls}">${sub}</div></div>`;
+    }).join('');
+  }
+  function tickMacro() {
+    MACRO.forEach(m => { m.v += (Math.random() - 0.5) * m.step * 2; });
+    renderMacro();
   }
 
   /* ── ニュース・イベント(デモ)── */
@@ -554,18 +750,19 @@
       activeTf = tf;
       [...tabsEl.children].forEach(x => x.classList.toggle('on', x === b));
       hoverIdx = -1; tip.style.display = 'none';
-      drawPrice();
+      drawPrice(); drawInd();
     });
     tabsEl.appendChild(b);
   });
   tabsEl.firstChild.classList.add('on');
 
-  window.addEventListener('resize', () => { drawPrice(); drawEquity(); });
+  window.addEventListener('resize', () => { drawPrice(); drawInd(); drawEquity(); });
 
   /* 起動 */
   pushThought('system', `エージェント起動。ペーパートレードモードで BTC/JPY の監視を開始します。リスク上限: 1取引 ${yen(RISK.perTrade)} / 日次損失 ${yen(RISK.dailyLoss)}。`, { system: true });
-  drawPrice(); drawEquity(); refresh();
+  drawPrice(); drawInd(); drawEquity(); refresh(); renderMacro();
   setInterval(tickPrice, 2000);
+  setInterval(tickMacro, 5000);
   setInterval(agentCycle, 9000);
   setTimeout(agentCycle, 2500);
   setInterval(pushEvent, 16000);
