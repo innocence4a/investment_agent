@@ -1,3 +1,6 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Quant — 自動売買ダッシュボード(モック)</title>
 <style>
   :root{
@@ -33,7 +36,7 @@
         color:var(--down-text);background:rgba(224,85,96,.12);border:1px solid rgba(224,85,96,.45);
         border-radius:8px;padding:8px 14px}
   .kill:hover{background:rgba(224,85,96,.2)}
-  .kill:focus-visible,.tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .kill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .halt-banner{display:none;padding:10px 18px;border-radius:var(--r);font-weight:700;
                background:rgba(224,85,96,.14);border:1px solid rgba(224,85,96,.5);color:var(--down-text)}
   body.halted .halt-banner{display:block}
@@ -94,7 +97,6 @@
   .fill .t{color:var(--muted);font-size:11px}
   .fill .amt{margin-left:auto}
   .note{color:var(--muted);font-size:12px;text-align:center}
-  .note a{color:var(--ink2)}
 
   @media (max-width:960px){
     .kpis{grid-template-columns:repeat(2,1fr)}
@@ -114,13 +116,13 @@
       <span>Claude Quant<small>自動売買エージェント</small></span>
     </div>
     <span class="badge paper">PAPER</span>
-    <span class="live"><span class="dot"></span><span id="liveLabel">稼働中 · 判断サイクル 5分</span></span>
+    <span class="live"><span class="dot"></span><span id="liveLabel">稼働中 · 判断サイクル 5分(デモ: 9秒)</span></span>
     <span class="spacer"></span>
     <span class="clock num" id="clock">--:--:-- JST</span>
     <button class="kill" id="killBtn" type="button">緊急停止</button>
   </header>
 
-  <div class="halt-banner">⏸ 緊急停止中 — 新規エントリーと判断サイクルを停止しています。「緊急停止」ボタンで再開できます。</div>
+  <div class="halt-banner">⏸ 緊急停止中 — 新規エントリーを停止しています(既存ポジションの決済監視は継続)。「再開する」ボタンで復帰できます。</div>
 
   <section class="kpis" aria-label="サマリー">
     <div class="kpi"><div class="label">総資産</div><div class="value num" id="kEquity">¥1,000,000</div><div class="sub num" id="kEquitySub">開始 ¥1,000,000</div></div>
@@ -135,7 +137,7 @@
       <section class="panel">
         <div class="panel-head">
           <h2>BTC / JPY</h2>
-          <span class="meta">5秒足(デモ) · ▲買い ▼売り マーカー</span>
+          <span class="meta">2秒足(デモ) · ▲買い ▼売り マーカー</span>
           <span class="meta num" id="lastPrice" style="margin-left:auto"></span>
         </div>
         <div class="chart-wrap">
@@ -183,33 +185,31 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const yen = v => '¥' + Math.round(v).toLocaleString('ja-JP');
-  const sign = v => (v >= 0 ? '+' : '−') + yen(Math.abs(v)).slice(0);
+  const sign = v => (v >= 0 ? '+' : '−') + yen(Math.abs(v));
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   const C = { up: css('--up'), down: css('--down'), upT: css('--up-text'), downT: css('--down-text'),
               accent: css('--accent'), grid: css('--line'), muted: css('--muted'), ink2: css('--ink2') };
 
   /* ── 状態 ── */
   const START = 1_000_000;
-  let price = 17_420_000, candles = [], equity = [START], markers = [];
+  const RISK = { perTrade: 50_000, dailyLoss: 30_000 };
+  let price = 17_420_000, candles = [], equity = [], markers = [];
   let cash = START, btc = 0, avgCost = 0;
   let wins = 0, losses = 0, todayPnl = 0, halted = false;
   const t0 = Date.now();
 
-  // ローソク足の初期履歴(ランダムウォーク)
-  for (let i = 0; i < 70; i++) {
-    const o = price, drift = (Math.random() - 0.495) * 9000;
-    const c = o + drift;
-    candles.push({ o, c, h: Math.max(o, c) + Math.random() * 4000, l: Math.min(o, c) - Math.random() * 4000 });
+  function nextCandle() {
+    const o = price, c = o + (Math.random() - 0.495) * 9000;
     price = c;
-    equity.push(equity[equity.length - 1] + (Math.random() - 0.47) * 900);
+    return { o, c, h: Math.max(o, c) + Math.random() * 4000, l: Math.min(o, c) - Math.random() * 4000 };
   }
-  // 初期履歴の終端を開始資金に合わせる(稼働後の実値との段差をなくす)
-  const eqShift = START - equity[equity.length - 1];
-  equity = equity.map(v => v + eqShift);
+  // ローソク足の初期履歴。資産は取引 0 回で開始するため開始資金のフラットな線
+  for (let i = 0; i < 70; i++) candles.push(nextCandle());
+  equity = Array(70).fill(START);
 
   /* ── 時計・稼働時間 ── */
   setInterval(() => {
-    $('clock').textContent = new Date().toLocaleTimeString('ja-JP', { hour12: false, timeZone: 'Asia/Tokyo' }) + ' JST';
+    $('clock').textContent = timeStr() + ' JST';
     const s = Math.floor((Date.now() - t0) / 1000);
     $('kUptime').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
   }, 1000);
@@ -220,8 +220,10 @@
   let hoverIdx = -1;
 
   function fit(cv) {
-    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = +cv.getAttribute('height');
-    cv.width = w * dpr; cv.height = h * dpr; cv.style.height = h + 'px';
+    if (!cv._h) cv._h = +cv.getAttribute('height'); // 論理高さは初回に固定(DPR 反映後の height 属性を再読込すると倍々に肥大する)
+    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv._h;
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; cv.style.height = h + 'px'; }
     cv.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
     return { w, h };
   }
@@ -268,7 +270,10 @@
     pctx.setLineDash([]);
     const tagY = y(last.c), upNow = last.c >= last.o;
     pctx.fillStyle = upNow ? C.up : C.down;
-    pctx.beginPath(); pctx.roundRect(w - pad.r + 2, tagY - 10, pad.r - 6, 20, 5); pctx.fill();
+    pctx.beginPath();
+    if (pctx.roundRect) pctx.roundRect(w - pad.r + 2, tagY - 10, pad.r - 6, 20, 5); // Safari 16 未満には未実装
+    else pctx.rect(w - pad.r + 2, tagY - 10, pad.r - 6, 20);
+    pctx.fill();
     pctx.fillStyle = '#fff'; pctx.textAlign = 'left';
     pctx.fillText(yen(last.c), w - pad.r + 8, tagY + 4);
     // ホバー十字線
@@ -278,7 +283,7 @@
       pctx.beginPath(); pctx.moveTo(x, pad.t); pctx.lineTo(x, h - pad.b); pctx.stroke();
       pctx.setLineDash([]);
     }
-    pc._geom = { pad, bw, view, base };
+    pc._geom = { pad, bw, view };
   }
 
   function drawEquity() {
@@ -293,8 +298,7 @@
     ectx.strokeStyle = C.grid; ectx.setLineDash([4, 4]);
     ectx.beginPath(); ectx.moveTo(pad.l, y(START)); ectx.lineTo(w - pad.r, y(START)); ectx.stroke();
     ectx.setLineDash([]);
-    ectx.fillStyle = C.muted; ectx.font = '11px ui-monospace,Menlo,monospace';
-    ectx.fillText(yen(START), w - pad.r + 8, y(START) + 4);
+    ectx.font = '11px ui-monospace,Menlo,monospace';
     // エリア+ライン
     const grad = ectx.createLinearGradient(0, pad.t, 0, h);
     grad.addColorStop(0, 'rgba(92,142,232,.28)'); grad.addColorStop(1, 'rgba(92,142,232,0)');
@@ -309,25 +313,35 @@
     const lv = view[view.length - 1];
     ectx.fillStyle = C.accent;
     ectx.beginPath(); ectx.arc(x(view.length - 1), y(lv), 3.5, 0, 7); ectx.fill();
+    if (Math.abs(y(lv) - y(START)) >= 14) { // 現在値と近接する間は開始ラベルを省略して重なりを防ぐ
+      ectx.fillStyle = C.muted;
+      ectx.fillText(yen(START), w - pad.r + 8, y(START) + 4);
+    }
     ectx.fillStyle = lv >= START ? C.upT : C.downT;
-    ectx.fillText(yen(lv), w - pad.r + 8, y(lv) + (Math.abs(y(lv) - y(START)) < 14 ? -8 : 4));
+    ectx.fillText(yen(lv), w - pad.r + 8, y(lv) + 4);
   }
 
   /* ── ホバーツールチップ ── */
   const tip = $('tip');
-  pc.addEventListener('mousemove', e => {
+  let lastMouse = null; // ローソクが流れてもツールチップとカーソル位置がずれないよう、tick 側からも再解決する
+  function resolveHover(mx, my) {
     const g = pc._geom; if (!g) return;
-    const r = pc.getBoundingClientRect(), mx = e.clientX - r.left;
+    const r = pc.getBoundingClientRect();
     hoverIdx = Math.floor((mx - g.pad.l) / g.bw);
     const c = g.view[hoverIdx];
     if (!c || mx > r.width - g.pad.r) { tip.style.display = 'none'; hoverIdx = -1; drawPrice(); return; }
     tip.style.display = 'block';
     tip.style.left = Math.min(mx + 14, r.width - 190) + 'px';
-    tip.style.top = (e.clientY - r.top + 14) + 'px';
+    tip.style.top = (my + 14) + 'px';
     tip.innerHTML = `始値 <span class="num">${yen(c.o)}</span><br>高値 <span class="num">${yen(c.h)}</span><br>安値 <span class="num">${yen(c.l)}</span><br>終値 <span class="num">${yen(c.c)}</span>`;
     drawPrice();
+  }
+  pc.addEventListener('mousemove', e => {
+    const r = pc.getBoundingClientRect();
+    lastMouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+    resolveHover(lastMouse.x, lastMouse.y);
   });
-  pc.addEventListener('mouseleave', () => { tip.style.display = 'none'; hoverIdx = -1; drawPrice(); });
+  pc.addEventListener('mouseleave', () => { lastMouse = null; tip.style.display = 'none'; hoverIdx = -1; drawPrice(); });
 
   /* ── KPI・テーブル更新 ── */
   function equityNow() { return cash + btc * price; }
@@ -375,50 +389,60 @@
       '直近 2 連敗のため、ルールに基づきポジションサイズを半分に制限中。基準を満たすシグナルが出るまで待機します。',
     ],
   };
-  function pushThought(kind, extra) {
-    const ul = $('thoughtLog');
+  const timeStr = () => new Date().toLocaleTimeString('ja-JP', { hour12: false, timeZone: 'Asia/Tokyo' });
+  function prependCapped(ul, li, max) {
+    ul.prepend(li);
+    while (ul.children.length > max) ul.lastChild.remove();
+  }
+  // opts.system: オペレーター/システム由来のカード(確信度・リスクゲート表記なし)
+  // opts.gate  : リスクゲートの結果表記(省略時 '通過')
+  function pushThought(kind, extra, opts = {}) {
     const li = document.createElement('li');
     li.className = 'thought';
-    const label = { buy: '買い', sell: '売り', skip: '見送り' }[kind];
-    const conf = 58 + Math.floor(Math.random() * 34);
+    const label = { buy: '買い', sell: '売り', skip: '見送り', system: 'システム' }[kind];
     const pool = REASONS[kind];
-    li.innerHTML = `<div class="row1"><span class="chip ${kind}">${label}</span>
-      <span class="t num">${new Date().toLocaleTimeString('ja-JP', { hour12: false })}</span></div>
-      <p>${extra || pool[Math.floor(Math.random() * pool.length)]}</p>
-      <div class="conf">確信度 <b class="num">${conf}%</b> · リスクゲート: 通過</div>`;
-    ul.prepend(li);
-    while (ul.children.length > 12) ul.lastChild.remove();
+    const footer = opts.system ? '' :
+      `<div class="conf">確信度 <b class="num">${58 + Math.floor(Math.random() * 34)}%</b> · リスクゲート: ${opts.gate || '通過'}</div>`;
+    li.innerHTML = `<div class="row1"><span class="chip ${kind === 'system' ? 'skip' : kind}">${label}</span>
+      <span class="t num">${timeStr()}</span></div>
+      <p>${extra || pool[Math.floor(Math.random() * pool.length)]}</p>${footer}`;
+    prependCapped($('thoughtLog'), li, 12);
   }
   function pushFill(side, qty, px) {
-    const ul = $('feedList');
     const li = document.createElement('li');
     li.className = 'fill';
     const cls = side === 'buy' ? 'pos' : 'neg', mark = side === 'buy' ? '▲ 買' : '▼ 売';
-    li.innerHTML = `<span class="t num">${new Date().toLocaleTimeString('ja-JP', { hour12: false })}</span>
+    li.innerHTML = `<span class="t num">${timeStr()}</span>
       <span class="${cls}" style="font-weight:700">${mark}</span>
       <span>BTC <span class="num">${qty.toFixed(4)}</span></span>
       <span class="amt num">${yen(px)}</span>`;
-    ul.prepend(li);
-    while (ul.children.length > 14) ul.lastChild.remove();
+    prependCapped($('feedList'), li, 14);
   }
 
   /* ── シミュレーション ── */
   function tickPrice() {
-    const drift = (Math.random() - 0.495) * 9000;
-    const o = price, c = o + drift;
-    candles.push({ o, c, h: Math.max(o, c) + Math.random() * 4000, l: Math.min(o, c) - Math.random() * 4000 });
-    if (candles.length > 400) candles.shift(), markers.forEach(m => m.i--), markers = markers.filter(m => m.i >= 0);
-    price = c;
+    candles.push(nextCandle());
+    if (candles.length > 400) {
+      candles.shift();
+      markers.forEach(m => m.i--);
+      markers = markers.filter(m => m.i >= 0);
+    }
     equity.push(equityNow());
     if (equity.length > 600) equity.shift();
     drawPrice(); drawEquity(); refresh();
+    if (lastMouse) resolveHover(lastMouse.x, lastMouse.y);
   }
 
   function agentCycle() {
-    if (halted) return;
+    if (halted && btc === 0) return; // 停止中は新規エントリーなし。既存ポジションの決済監視のみ継続
     const r = Math.random();
-    if (btc === 0 && r < 0.45) {          // エントリー
-      const qty = +(0.002 + Math.random() * 0.004).toFixed(4);
+    if (!halted && btc === 0 && r < 0.45) {          // エントリー
+      if (todayPnl <= -RISK.dailyLoss) {
+        pushThought('skip', `日次損失が上限(${yen(RISK.dailyLoss)})に到達しているため、リスクゲートが新規エントリーを拒否しました。本日は決済のみ行います。`, { gate: '発動(日次損失上限)' });
+        return;
+      }
+      const notional = 20_000 + Math.random() * (RISK.perTrade - 22_000); // 1取引上限の範囲内
+      const qty = +(notional / price).toFixed(4);
       avgCost = price; btc = qty; cash -= qty * price;
       markers.push({ i: candles.length - 1, side: 'buy' });
       pushThought('buy'); pushFill('buy', qty, price);
@@ -429,7 +453,7 @@
       pushThought('sell'); pushFill('sell', btc, price);
       todayPnl += pnl; pnl >= 0 ? wins++ : losses++;
       btc = 0; avgCost = 0;
-    } else {
+    } else if (!halted) {
       pushThought('skip');
     }
     refresh();
@@ -440,16 +464,16 @@
     halted = !halted;
     document.body.classList.toggle('halted', halted);
     $('killBtn').textContent = halted ? '再開する' : '緊急停止';
-    $('liveLabel').textContent = halted ? '停止中' : '稼働中 · 判断サイクル 5分';
-    pushThought('skip', halted
-      ? 'オペレーターにより緊急停止が実行されました。全ての新規エントリーを停止します。'
-      : 'オペレーターにより再開されました。次の判断サイクルから通常運転に戻ります。');
+    $('liveLabel').textContent = halted ? '停止中(決済監視は継続)' : '稼働中 · 判断サイクル 5分(デモ: 9秒)';
+    pushThought('system', halted
+      ? 'オペレーターにより緊急停止が実行されました。新規エントリーを停止します(既存ポジションの決済監視は継続)。'
+      : 'オペレーターにより再開されました。次の判断サイクルから通常運転に戻ります。', { system: true });
   });
 
   window.addEventListener('resize', () => { drawPrice(); drawEquity(); });
 
   /* 起動 */
-  pushThought('skip', 'エージェント起動。ペーパートレードモードで BTC/JPY の監視を開始します。リスク上限: 1取引 ¥50,000 / 日次損失 ¥30,000。');
+  pushThought('system', `エージェント起動。ペーパートレードモードで BTC/JPY の監視を開始します。リスク上限: 1取引 ${yen(RISK.perTrade)} / 日次損失 ${yen(RISK.dailyLoss)}。`, { system: true });
   drawPrice(); drawEquity(); refresh();
   setInterval(tickPrice, 2000);
   setInterval(agentCycle, 9000);
