@@ -87,7 +87,7 @@
   .thought .conf b{color:var(--ink)}
 
   /* ── bottom: positions + feed ───────── */
-  .bottom{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:14px}
+  .bottom{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,4fr) minmax(0,5fr);gap:14px}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th{font-size:11px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;font-weight:600;
      text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
@@ -101,6 +101,17 @@
   .fill:last-child{border-bottom:none}
   .fill .t{color:var(--muted);font-size:11px}
   .fill .amt{margin-left:auto}
+  .events{max-height:280px}
+  .event{padding:8px 2px;border-bottom:1px solid var(--line);font-size:12.5px}
+  .event:last-child{border-bottom:none}
+  .event .row1{display:flex;align-items:center;gap:8px;margin-bottom:3px}
+  .event p{margin:0;color:var(--ink2)}
+  .imp{font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:1px 7px;border-radius:999px}
+  .imp.hi{color:var(--down-text);background:rgba(224,85,96,.13);border:1px solid rgba(224,85,96,.45)}
+  .imp.mid{color:#d7a94e;background:rgba(187,138,38,.13);border:1px solid rgba(187,138,38,.5)}
+  .imp.lo{color:var(--ink2);background:rgba(147,161,181,.08);border:1px solid var(--line)}
+  .event .src{font-size:11px;color:var(--muted)}
+  .event .t{margin-left:auto;font-size:11px;color:var(--muted)}
   .note{color:var(--muted);font-size:12px;text-align:center}
 
   @media (max-width:960px){
@@ -180,6 +191,10 @@
     <section class="panel feed">
       <div class="panel-head"><h2>約定フィード</h2><span class="meta">ライブ</span></div>
       <ul class="feed-list" id="feedList"></ul>
+    </section>
+    <section class="panel events">
+      <div class="panel-head"><h2>ニュース・イベント</h2><span class="meta">要人発言・経済指標(デモ)</span></div>
+      <ul class="feed-list" id="eventList"></ul>
     </section>
   </div>
 
@@ -492,6 +507,32 @@
     refresh();
   }
 
+  /* ── ニュース・イベント(デモ)── */
+  const EVENTS = [
+    { imp: 'hi',  label: '高', src: 'X / 要人', text: '米大統領が対中関税の引き上げを示唆するポストを投稿',
+      react: '要人ポストを検知(対中関税示唆)。ボラティリティ急拡大の恐れがあるため、新規エントリーを一時停止し価格反応を確認します。' },
+    { imp: 'hi',  label: '高', src: '要人発言', text: 'FRB議長「利下げを急ぐ状況にはない」— 講演ヘッドライン',
+      react: 'FRB議長のタカ派発言を検知。リスク資産に売り圧力が想定されるため、新規エントリーを一時停止します。' },
+    { imp: 'hi',  label: '高', src: '経済指標', text: '米CPI(6月)前年比 +3.1%、市場予想 +2.9% を上回る',
+      react: 'CPI が予想を上回りました。発表直後のスパイクが収まるまで新規エントリーを停止し、方向性が出たら再評価します。' },
+    { imp: 'mid', label: '中', src: 'X / 要人', text: '財務長官がステーブルコイン規制法案への支持を表明', react: null },
+    { imp: 'mid', label: '中', src: '経済指標', text: '米新規失業保険申請件数は市場予想の範囲内', react: null },
+    { imp: 'mid', label: '中', src: 'ニュース', text: '大手取引所で一時的な出金遅延の報告、原因調査中', react: null },
+    { imp: 'lo',  label: '低', src: 'ニュース', text: '主要アルトコインの大型アップグレード日程が確定', react: null },
+    { imp: 'lo',  label: '低', src: 'ニュース', text: '海外運用大手が四半期レポートで BTC 保有比率を維持', react: null },
+  ];
+  function pushEvent() {
+    const ev = EVENTS[Math.floor(Math.random() * EVENTS.length)];
+    const li = document.createElement('li');
+    li.className = 'event';
+    li.innerHTML = `<div class="row1"><span class="imp ${ev.imp}">${ev.label}</span>
+      <span class="src">${ev.src}</span><span class="t num">${timeStr()}</span></div>
+      <p>${ev.text}</p>`;
+    prependCapped($('eventList'), li, 10);
+    // 高インパクトはイベントドリブン判断: 定期サイクルを待たず防御反応を思考ログへ
+    if (ev.react && !halted) setTimeout(() => pushThought('skip', ev.react, { gate: 'イベント警戒' }), 1600);
+  }
+
   /* ── 緊急停止 ── */
   $('killBtn').addEventListener('click', () => {
     halted = !halted;
@@ -527,5 +568,7 @@
   setInterval(tickPrice, 2000);
   setInterval(agentCycle, 9000);
   setTimeout(agentCycle, 2500);
+  setInterval(pushEvent, 16000);
+  setTimeout(pushEvent, 5000);
 })();
 </script>
