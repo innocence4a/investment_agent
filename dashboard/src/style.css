@@ -1,0 +1,116 @@
+/* デザイントークン・レイアウトは docs/dashboard-mockup.html(デザインの正)から移植 */
+:root{
+  --bg:#0b0e14; --surface:#121722; --surface-2:#181f2c; --line:#222b3a;
+  --ink:#e8edf4; --ink2:#93a1b5; --muted:#5d6a7d;
+  --up:#2aa876; --up-text:#43cf97; --down:#e05560; --down-text:#f2757f;
+  --accent:#5c8ee8; --accent-soft:rgba(92,142,232,.14); --gold:#bb8a26;
+  --sans:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  --r:10px;
+}
+html{color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);margin:0;
+     font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.app{max-width:1280px;margin:0 auto;padding:20px 20px 48px;display:flex;flex-direction:column;gap:14px}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ── header ─────────────────────────── */
+.topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+        padding:14px 18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.02em}
+.brand .mark{width:30px;height:30px;border-radius:8px;background:var(--accent-soft);
+             display:grid;place-items:center;color:var(--accent);font-family:var(--mono);font-weight:700}
+.brand small{display:block;font-weight:400;color:var(--muted);font-size:11px;letter-spacing:.08em}
+.badge{font-size:11px;font-weight:700;letter-spacing:.12em;padding:4px 10px;border-radius:999px}
+.badge.paper{color:var(--gold);border:1px solid color-mix(in srgb,var(--gold) 55%,transparent);background:rgba(187,138,38,.12)}
+.badge.live-mode{color:var(--down-text);border:1px solid rgba(224,85,96,.55);background:rgba(224,85,96,.12)}
+.badge.sim{color:var(--accent);border:1px solid rgba(92,142,232,.5);background:var(--accent-soft)}
+.live{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink2)}
+.live .dot{width:8px;height:8px;border-radius:50%;background:var(--up-text);box-shadow:0 0 0 0 rgba(67,207,151,.5);animation:pulse 2s infinite}
+@keyframes pulse{70%{box-shadow:0 0 0 9px rgba(67,207,151,0)}100%{box-shadow:0 0 0 0 rgba(67,207,151,0)}}
+.spacer{flex:1}
+.clock{color:var(--ink2);font-size:13px}
+.kill{font:inherit;font-weight:700;font-size:12px;letter-spacing:.06em;cursor:pointer;
+      color:var(--down-text);background:rgba(224,85,96,.12);border:1px solid rgba(224,85,96,.45);
+      border-radius:8px;padding:8px 14px}
+.kill:hover{background:rgba(224,85,96,.2)}
+.kill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.halt-banner{display:none;padding:10px 18px;border-radius:var(--r);font-weight:700;
+             background:rgba(224,85,96,.14);border:1px solid rgba(224,85,96,.5);color:var(--down-text)}
+body.halted .halt-banner{display:block}
+body.halted .live .dot{background:var(--down-text);animation:none}
+body.disconnected .live .dot{background:var(--muted);animation:none}
+
+/* ── KPI row ────────────────────────── */
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px 12px}
+.kpi .label{font-size:11px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+.kpi .value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:22px;font-weight:700;margin-top:4px}
+.kpi .sub{font-size:12px;color:var(--ink2);margin-top:2px}
+.pos{color:var(--up-text)} .neg{color:var(--down-text)}
+
+/* ── panels & grid ──────────────────── */
+.grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:14px;align-items:stretch}
+.col-main{display:flex;flex-direction:column;gap:14px;min-width:0}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+       padding:14px 16px;min-width:0;display:flex;flex-direction:column}
+.panel-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.panel-head h2{font-size:13px;font-weight:700;letter-spacing:.04em;margin:0}
+.panel-head .meta{font-size:12px;color:var(--muted)}
+.tf-tabs{display:flex;gap:2px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:2px}
+.tf{font:inherit;font-size:11.5px;color:var(--ink2);background:none;border:0;border-radius:6px;padding:3px 9px;cursor:pointer}
+.tf:hover{color:var(--ink)}
+.tf.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
+.tf:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.chart-wrap{position:relative}
+canvas{display:block;width:100%}
+#rsiChart,#macdChart{margin-top:8px;border-top:1px solid var(--line);padding-top:6px}
+.tooltip{position:absolute;pointer-events:none;background:var(--surface-2);border:1px solid var(--line);
+         border-radius:8px;padding:8px 10px;font-size:12px;color:var(--ink2);display:none;z-index:5;
+         box-shadow:0 8px 24px rgba(0,0,0,.4);white-space:nowrap}
+.tooltip .num{color:var(--ink)}
+
+/* ── 思考ログ ────────────────────────── */
+.thoughts{max-height:790px}
+.thought-list{list-style:none;margin:0;padding:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;flex:1}
+.thought{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+         animation:slidein .35s ease}
+@keyframes slidein{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.thought .row1{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.chip{font-size:11px;font-weight:700;letter-spacing:.08em;padding:2px 9px;border-radius:999px}
+.chip.buy{color:var(--up-text);background:rgba(42,168,118,.14);border:1px solid rgba(42,168,118,.5)}
+.chip.sell{color:var(--down-text);background:rgba(224,85,96,.14);border:1px solid rgba(224,85,96,.5)}
+.chip.skip{color:var(--ink2);background:rgba(147,161,181,.1);border:1px solid var(--line)}
+.chip.risk{color:#d7a94e;background:rgba(187,138,38,.13);border:1px solid rgba(187,138,38,.5)}
+.thought .agent{font-size:10.5px;color:var(--muted);letter-spacing:.04em}
+.thought .t{margin-left:auto;font-size:11px;color:var(--muted)}
+.thought p{margin:0;font-size:12.5px;color:var(--ink2)}
+.thought .conf{font-size:11px;color:var(--muted);margin-top:6px}
+.thought .conf b{color:var(--ink)}
+
+/* ── bottom: positions + feed ───────── */
+.bottom{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:14px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-size:11px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;font-weight:600;
+   text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+td{padding:8px;text-align:right;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:none}
+.dir{font-size:11px;font-weight:700;letter-spacing:.06em}
+.feed{max-height:280px}
+.feed-list{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1}
+.fill{display:flex;align-items:center;gap:10px;padding:7px 2px;border-bottom:1px solid var(--line);font-size:12.5px}
+.fill:last-child{border-bottom:none}
+.fill .t{color:var(--muted);font-size:11px}
+.fill .amt{margin-left:auto}
+.note{color:var(--muted);font-size:12px;text-align:center}
+
+@media (max-width:960px){
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .grid,.bottom{grid-template-columns:1fr}
+  .thoughts{max-height:420px}
+}
+@media (prefers-reduced-motion:reduce){
+  .live .dot{animation:none}
+  .thought{animation:none}
+}

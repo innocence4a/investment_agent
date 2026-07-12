@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23121722'/%3E%3Ctext x='16' y='22' font-family='monospace' font-weight='700' font-size='18' fill='%235c8ee8' text-anchor='middle'%3EQ%3C/text%3E%3C/svg%3E" />
+  <title>Claude Quant — 自動売買ダッシュボード</title>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">Q</span>
+        <span>Claude Quant<small>自動売買エージェント</small></span>
+      </div>
+      <span class="badge paper" id="modeBadge">PAPER</span>
+      <span class="badge sim" id="feedBadge" hidden>SIM データ</span>
+      <span class="badge sim" id="llmBadge" hidden>モック判断</span>
+      <span class="live"><span class="dot" id="liveDot"></span><span id="liveLabel">接続中…</span></span>
+      <span class="spacer"></span>
+      <span class="clock num" id="clock">--:--:-- JST</span>
+      <button class="kill" id="killBtn" type="button">緊急停止</button>
+    </header>
+
+    <div class="halt-banner">⏸ 緊急停止中 — 新規エントリーを停止しています(既存ポジションの損切り・利確監視は継続)。「再開する」ボタンで復帰できます。</div>
+
+    <section class="kpis" aria-label="サマリー">
+      <div class="kpi"><div class="label">総資産</div><div class="value num" id="kEquity">—</div><div class="sub num" id="kEquitySub"></div></div>
+      <div class="kpi"><div class="label">累計損益</div><div class="value num" id="kPnl">—</div><div class="sub num" id="kPnlPct"></div></div>
+      <div class="kpi"><div class="label">本日損益</div><div class="value num" id="kToday">—</div><div class="sub" id="kTodaySub"></div></div>
+      <div class="kpi"><div class="label">勝率</div><div class="value num" id="kWin">—</div><div class="sub num" id="kTrades"></div></div>
+      <div class="kpi"><div class="label">稼働時間</div><div class="value num" id="kUptime">—</div><div class="sub">Phase 1 · ペーパートレード</div></div>
+    </section>
+
+    <div class="grid">
+      <div class="col-main">
+        <section class="panel">
+          <div class="panel-head">
+            <h2 id="chartTitle">BTC / JPY</h2>
+            <div class="tf-tabs" id="symTabs" role="tablist" aria-label="銘柄"></div>
+            <div class="tf-tabs" id="tfTabs" role="tablist" aria-label="タイムフレーム"></div>
+            <span class="meta">▲買い ▼売り は5分足に表示</span>
+            <span class="meta num" id="lastPrice" style="margin-left:auto"></span>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="priceChart" height="300" aria-label="価格チャート(売買マーカー・移動平均線付き)"></canvas>
+            <div class="tooltip" id="tip"></div>
+          </div>
+          <canvas id="rsiChart" height="64" aria-label="RSI(14)"></canvas>
+          <canvas id="macdChart" height="76" aria-label="MACD(12,26,9)"></canvas>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>資産推移</h2>
+            <span class="meta">エクイティカーブ</span>
+          </div>
+          <canvas id="equityChart" height="150" aria-label="資産推移チャート"></canvas>
+        </section>
+      </div>
+
+      <aside class="panel thoughts">
+        <div class="panel-head">
+          <h2>エージェント思考ログ</h2>
+          <span class="meta" id="thoughtsMeta">全判断(見送り含む)を記録</span>
+        </div>
+        <ul class="thought-list" id="thoughtLog"></ul>
+      </aside>
+    </div>
+
+    <div class="bottom">
+      <section class="panel">
+        <div class="panel-head"><h2>ポジション</h2><span class="meta" id="posMeta"></span></div>
+        <table aria-label="保有ポジション">
+          <thead><tr><th>銘柄</th><th>方向</th><th>数量</th><th>平均取得</th><th>現在値</th><th>評価損益</th></tr></thead>
+          <tbody id="posBody"></tbody>
+        </table>
+      </section>
+      <section class="panel feed">
+        <div class="panel-head"><h2>約定フィード</h2><span class="meta">ライブ</span></div>
+        <ul class="feed-list" id="feedList"></ul>
+      </section>
+    </div>
+
+    <p class="note" id="footNote">Phase 1 · ペーパートレード — 実際の発注は行われません。</p>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
