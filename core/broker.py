@@ -65,10 +65,17 @@ class PaperBroker:
         self._positions = {p.symbol: p for p in positions if p.qty > 0}
 
     def exposure(self, prices: dict[Symbol, int]) -> int:
-        """全ポジションの評価額合計(JPY)。"""
+        """全ポジションの評価額合計(JPY)。
+
+        価格が未取得の銘柄は取得単価で評価する(0 円評価にすると総エクスポージャを
+        過小評価し、リスクゲートの上限判定が甘くなるため)。
+        """
         total = 0
         for s, p in self.positions().items():
-            total += notional_jpy(p.qty, prices.get(s, 0))
+            price = prices.get(s)
+            if price is None or price <= 0:
+                price = int(p.avg_cost.quantize(Decimal("1"), ROUND_HALF_UP))
+            total += notional_jpy(p.qty, price)
         return total
 
     def equity(self, prices: dict[Symbol, int]) -> int:

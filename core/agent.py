@@ -9,16 +9,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any, Protocol
 
 import anthropic
+from pydantic import ValidationError
 
 from core.config import Settings
 from core.indicators import macd, rsi, sma
 from core.market import MarketState
 from core.models import SYMBOLS, Position, Symbol, Timeframe, TraderDecision, utcnow
 from core.store import Store
+
+logger = logging.getLogger(__name__)
 
 AGENT_NAME = "トレーダー"
 
@@ -74,8 +78,12 @@ def build_market_context(
     daily_pnl: int,
     trades_today: int,
     max_trade_notional: int,
+    exclude: set[Symbol] | None = None,
 ) -> dict[str, Any]:
-    """LLM に渡す市場スナップショットを組み立てる(JSON 化可能な dict)。"""
+    """LLM に渡す市場スナップショットを組み立てる(JSON 化可能な dict)。
+
+    exclude: フィード途絶中などで判断材料に含めない銘柄。
+    """
     ctx: dict[str, Any] = {
         "cash_jpy": cash,
         "daily_realized_pnl_jpy": daily_pnl,
@@ -84,6 +92,8 @@ def build_market_context(
         "symbols": {},
     }
     for sym in SYMBOLS:
+        if exclude and sym in exclude:
+            continue
         closes = market.closes(sym, Timeframe.M5)
         if not closes:
             continue
@@ -92,8 +102,10 @@ def build_market_context(
         ma7 = sma(closes, 7)
         ma25 = sma(closes, 25)
         pos = positions.get(sym)
+        candles_5m = market.candles[sym][Timeframe.M5]
         ctx["symbols"][sym] = {
             "price_jpy": market.last_price.get(sym),
+            "open_5m": candles_5m[-1].o if candles_5m else None,  # 現在足の始値
             "closes_5m_last12": [int(c) for c in closes[-12:]],
             "rsi14": round(r[-1], 1) if r and r[-1] is not None else None,
             "macd_hist": round(m_hist[-1], 1) if m_hist else None,
@@ -173,9 +185,14 @@ class AnthropicTraderAgent:
                 ],
             )
         except Exception as e:
+            # 失敗呼び出し(タイムアウト等)もサーバー側では課金され得るため概算計上する
+            est_cost = self._estimate_cost_usd(
+                len(SYSTEM_PROMPT) // 3 + len(json.dumps(context)) // 3, 512
+            )
+            await self._store.incr_state_float(self._month_key(), est_cost)
             await self._store.add_api_log(
                 ts=utcnow(), kind="llm_decision", model=self._settings.trader_model,
-                ok=False, latency_ms=int((time.monotonic() - t0) * 1000), cost_usd=None,
+                ok=False, latency_ms=int((time.monotonic() - t0) * 1000), cost_usd=est_cost,
                 request=request, response=f"{type(e).__name__}: {e}",
             )
             raise
@@ -183,7 +200,7 @@ class AnthropicTraderAgent:
         call_cost = self._estimate_cost_usd(
             response.usage.input_tokens, response.usage.output_tokens
         )
-        await self._store.set_state(self._month_key(), f"{cost + call_cost:.6f}")
+        await self._store.incr_state_float(self._month_key(), call_cost)
         text = next((b.text for b in response.content if b.type == "text"), "")
         await self._store.add_api_log(
             ts=utcnow(), kind="llm_decision", model=self._settings.trader_model,
@@ -198,12 +215,28 @@ class AnthropicTraderAgent:
                 },
             },
         )
+        # フェイルセーフ: 応答不能・途中切れ・スキーマ不一致はすべて「見送り」に倒し、
+        # 必ず日本語根拠付きの判断として返す(安全ルール 5: 全判断を記録)
         if response.stop_reason == "refusal" or not text:
             return TraderDecision(
                 action="hold", symbol="BTC_JPY", confidence=0,
                 reason="LLM 応答を取得できなかったため、安全側に倒して見送ります。",
             )
-        return TraderDecision.model_validate_json(text)
+        if response.stop_reason == "max_tokens":
+            return TraderDecision(
+                action="hold", symbol="BTC_JPY", confidence=0,
+                reason="LLM 応答が最大トークン数で途中打ち切りとなり完全な判断を取得"
+                "できなかったため、安全側に倒して見送ります。",
+            )
+        try:
+            return TraderDecision.model_validate_json(text)
+        except ValidationError:
+            logger.warning("LLM 応答のパースに失敗: %.200s", text)
+            return TraderDecision(
+                action="hold", symbol="BTC_JPY", confidence=0,
+                reason="LLM 応答を判断フォーマットとして解釈できなかったため、"
+                "安全側に倒して見送ります。",
+            )
 
 
 class MockTraderAgent:
@@ -275,12 +308,15 @@ class MockTraderAgent:
                     f"(±0.2% で{label})に従い決済します。",
                 )
             return None
-        if len(closes) >= 2 and int(price) <= min(int(c) for c in closes):
+        open_5m = s.get("open_5m")
+        dip_in_candle = open_5m is not None and int(price) < int(open_5m)
+        dip_vs_closes = len(closes) >= 2 and int(price) <= min(int(c) for c in closes)
+        if dip_in_candle or dip_vs_closes:
             notional = min(20_000, max_notional, cash)
             if notional >= 10_000:
                 return TraderDecision(
                     action="buy", symbol=sym, notional_jpy=notional, confidence=56,
-                    reason="RSI(14) の算出に必要な履歴を蓄積中のため、直近安値タッチでの"
+                    reason="RSI(14) の算出に必要な履歴を蓄積中のため、足内の押し目での"
                     "打診買いルールで小口エントリーします(検証用の暫定ロジック)。",
                 )
         return None

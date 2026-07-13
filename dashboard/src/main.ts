@@ -31,15 +31,20 @@ function esc(s: string): string {
 }
 
 function thoughtHtml(t: Thought): string {
-  const meta = KIND_META[t.kind];
+  // 未知の kind はコアの更新が先行したケース。system 扱いにフォールバックし、
+  // 1 件の不正データで描画ループ全体が止まらないようにする
+  const meta = (KIND_META as Record<string, { label: string; chip: string }>)[t.kind]
+    ?? KIND_META.system;
   const footer =
     t.kind === "system"
       ? ""
       : `<div class="conf">${
-          t.confidence !== null ? `確信度 <b class="num">${t.confidence}%</b> · ` : ""
+          t.confidence !== null ? `確信度 <b class="num">${Number(t.confidence)}%</b> · ` : ""
         }リスクゲート: ${esc(t.gate ?? "—")}</div>`;
   return `<div class="row1"><span class="chip ${meta.chip}">${meta.label}</span>
-    <span class="agent">${esc(t.agent)}${t.symbol ? ` · ${t.symbol.replace("_", "/")}` : ""}</span>
+    <span class="agent">${esc(t.agent)}${
+      t.symbol ? ` · ${esc(t.symbol.replace("_", "/"))}` : ""
+    }</span>
     <span class="t num">${jstTime(t.ts)}</span></div>
     <p>${esc(t.text)}</p>${footer}`;
 }
@@ -66,7 +71,7 @@ function fillHtml(f: Fill): string {
       : "";
   return `<span class="t num">${jstTime(f.ts)}</span>
     <span class="${cls}" style="font-weight:700">${mark}</span>
-    <span>${f.symbol.split("_")[0]} <span class="num">${esc(f.qty)}</span></span>
+    <span>${esc(f.symbol.split("_")[0] ?? "")} <span class="num">${esc(f.qty)}</span></span>
     <span class="amt num">${yen(f.price)}${pnl}</span>`;
 }
 
@@ -97,7 +102,7 @@ function renderPositions(): void {
       const price = state.prices[p.symbol] ?? 0;
       const upnl = Math.round((price - p.avg_cost) * Number(p.qty));
       const cls = upnl >= 0 ? "pos" : "neg";
-      return `<tr><td>${p.symbol.replace("_", "/")}</td><td class="dir pos">ロング</td>
+      return `<tr><td>${esc(p.symbol.replace("_", "/"))}</td><td class="dir pos">ロング</td>
         <td class="num">${esc(p.qty)}</td><td class="num">${yen(p.avg_cost)}</td>
         <td class="num">${yen(price)}</td><td class="num ${cls}">${signedYen(upnl)}</td></tr>`;
     })
@@ -192,13 +197,33 @@ function buildTabs(): void {
 }
 
 // ── 緊急停止(F-13)────────────────────────────────
+let opErrorTimer: number | undefined;
+function showOpError(text: string): void {
+  const el = $("opError");
+  el.textContent = text;
+  el.hidden = false;
+  window.clearTimeout(opErrorTimer);
+  opErrorTimer = window.setTimeout(() => {
+    el.hidden = true;
+  }, 10_000);
+}
+
 $("killBtn").addEventListener("click", () => {
   const next = !state.halted;
   const msg = next
     ? "緊急停止しますか?\n新規エントリーを停止します(損切り・利確監視は継続)。"
     : "取引を再開しますか?";
   if (!window.confirm(msg)) return;
-  void requestHalt(next); // 状態はコア側が保持し、halt メッセージで反映される
+  // 状態はコア側が保持し、halt メッセージで画面に反映される。
+  // 失敗(コア停止・認証エラー等)は安全機能のためサイレントにせず必ず表示する
+  void requestHalt(next).then((ok) => {
+    if (!ok) {
+      showOpError(
+        (next ? "⚠ 緊急停止リクエストが失敗しました" : "⚠ 再開リクエストが失敗しました") +
+          " — コアに接続できないか、認証に失敗しています。もう一度お試しください。",
+      );
+    }
+  });
 });
 
 // ── 描画ループ(rAF で間引き)───────────────────────

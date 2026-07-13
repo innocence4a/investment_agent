@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from decimal import Decimal
@@ -22,6 +23,10 @@ class Store:
     def __init__(self, db_path: str) -> None:
         self._path = db_path
         self._db: aiosqlite.Connection | None = None
+        # 書き込みの直列化ロック。共有コネクション上で複数タスクの execute/commit が
+        # 交錯すると、複数文の書き込み(save_broker 等)が部分コミットされ得るため、
+        # すべての書き込みメソッドはこのロックの中で execute〜commit を完結させる
+        self._write_lock = asyncio.Lock()
 
     @property
     def db(self) -> aiosqlite.Connection:
@@ -62,22 +67,38 @@ class Store:
         return str(row["value"]) if row else default
 
     async def set_state(self, key: str, value: str) -> None:
-        await self.db.execute(
-            "INSERT INTO app_state (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
-        await self.db.commit()
+        async with self._write_lock:
+            await self.db.execute(
+                "INSERT INTO app_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            await self.db.commit()
+
+    async def incr_state_float(self, key: str, delta: float) -> float:
+        """浮動小数の状態値をアトミックに加算する(LLM 月次コストカウンタ用)。"""
+        async with self._write_lock:
+            cur = await self.db.execute("SELECT value FROM app_state WHERE key = ?", (key,))
+            row = await cur.fetchone()
+            value = (float(row["value"]) if row else 0.0) + delta
+            await self.db.execute(
+                "INSERT INTO app_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, f"{value:.6f}"),
+            )
+            await self.db.commit()
+            return value
 
     # ── 思考ログ ──
     async def add_thought(self, t: Thought) -> Thought:
-        cur = await self.db.execute(
-            "INSERT INTO thoughts (ts, agent, kind, text, symbol, confidence, gate) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (t.ts.isoformat(), t.agent, t.kind, t.text, t.symbol, t.confidence, t.gate),
-        )
-        await self.db.commit()
-        t.id = cur.lastrowid or 0
+        async with self._write_lock:
+            cur = await self.db.execute(
+                "INSERT INTO thoughts (ts, agent, kind, text, symbol, confidence, gate) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (t.ts.isoformat(), t.agent, t.kind, t.text, t.symbol, t.confidence, t.gate),
+            )
+            await self.db.commit()
+            t.id = cur.lastrowid or 0
         return t
 
     async def recent_thoughts(self, limit: int = 50) -> list[Thought]:
@@ -96,14 +117,15 @@ class Store:
 
     # ── 約定 ──
     async def add_fill(self, f: Fill) -> Fill:
-        cur = await self.db.execute(
-            "INSERT INTO fills (ts, symbol, side, qty, price, notional, fee, realized_pnl,"
-            " decision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (f.ts.isoformat(), f.symbol, f.side, str(f.qty), f.price, f.notional, f.fee,
-             f.realized_pnl, f.decision_id),
-        )
-        await self.db.commit()
-        f.id = cur.lastrowid or 0
+        async with self._write_lock:
+            cur = await self.db.execute(
+                "INSERT INTO fills (ts, symbol, side, qty, price, notional, fee, realized_pnl,"
+                " decision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f.ts.isoformat(), f.symbol, f.side, str(f.qty), f.price, f.notional, f.fee,
+                 f.realized_pnl, f.decision_id),
+            )
+            await self.db.commit()
+            f.id = cur.lastrowid or 0
         return f
 
     async def recent_fills(self, limit: int = 50) -> list[Fill]:
@@ -147,24 +169,27 @@ class Store:
         latency_ms: int | None, cost_usd: float | None,
         request: dict[str, Any] | None, response: dict[str, Any] | str | None,
     ) -> None:
-        await self.db.execute(
-            "INSERT INTO api_log (ts, kind, model, ok, latency_ms, cost_usd, request, response)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (ts.isoformat(), kind, model, int(ok), latency_ms, cost_usd,
-             json.dumps(request, ensure_ascii=False) if request is not None else None,
-             json.dumps(response, ensure_ascii=False) if response is not None else None),
-        )
-        await self.db.commit()
+        async with self._write_lock:
+            await self.db.execute(
+                "INSERT INTO api_log (ts, kind, model, ok, latency_ms, cost_usd, request,"
+                " response) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts.isoformat(), kind, model, int(ok), latency_ms, cost_usd,
+                 json.dumps(request, ensure_ascii=False) if request is not None else None,
+                 json.dumps(response, ensure_ascii=False) if response is not None else None),
+            )
+            await self.db.commit()
 
     # ── ローソク足 ──
     async def upsert_candle(self, c: Candle) -> None:
-        await self.db.execute(
-            "INSERT INTO candles (symbol, tf, open_ts, o, h, l, c) VALUES (?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(symbol, tf, open_ts) DO UPDATE SET"
-            " o = excluded.o, h = excluded.h, l = excluded.l, c = excluded.c",
-            (c.symbol, c.tf.value, c.open_ts.isoformat(), c.o, c.h, c.l, c.c),
-        )
-        await self.db.commit()
+        async with self._write_lock:
+            await self.db.execute(
+                "INSERT INTO candles (symbol, tf, open_ts, o, h, l, c)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(symbol, tf, open_ts) DO UPDATE SET"
+                " o = excluded.o, h = excluded.h, l = excluded.l, c = excluded.c",
+                (c.symbol, c.tf.value, c.open_ts.isoformat(), c.o, c.h, c.l, c.c),
+            )
+            await self.db.commit()
 
     async def load_candles(self, symbol: Symbol, tf: Timeframe, limit: int = 500) -> list[Candle]:
         cur = await self.db.execute(
@@ -183,12 +208,13 @@ class Store:
 
     # ── 資産推移 ──
     async def add_equity_snapshot(self, ts: datetime, equity: int, cash: int) -> None:
-        await self.db.execute(
-            "INSERT INTO equity_snapshots (ts, equity, cash) VALUES (?, ?, ?)"
-            " ON CONFLICT(ts) DO UPDATE SET equity = excluded.equity, cash = excluded.cash",
-            (ts.isoformat(), equity, cash),
-        )
-        await self.db.commit()
+        async with self._write_lock:
+            await self.db.execute(
+                "INSERT INTO equity_snapshots (ts, equity, cash) VALUES (?, ?, ?)"
+                " ON CONFLICT(ts) DO UPDATE SET equity = excluded.equity, cash = excluded.cash",
+                (ts.isoformat(), equity, cash),
+            )
+            await self.db.commit()
 
     async def recent_equity(self, limit: int = 500) -> list[EquityPoint]:
         cur = await self.db.execute(
@@ -201,18 +227,22 @@ class Store:
 
     # ── ブローカー状態(再起動復元) ──
     async def save_broker(self, cash: int, positions: dict[Symbol, Position]) -> None:
-        await self.db.execute(
-            "INSERT INTO app_state (key, value) VALUES ('broker_cash', ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(cash),),
-        )
-        await self.db.execute("DELETE FROM broker_positions")
-        for p in positions.values():
+        # DELETE→INSERT は 1 トランザクションで確定させる(部分コミットするとクラッシュ時に
+        # 保有ポジションの記録が消え、再起動後の損切り監視から外れるため)。
+        # 書き込みロックにより他タスクの commit が割り込まないことを保証する
+        async with self._write_lock:
             await self.db.execute(
-                "INSERT INTO broker_positions (symbol, qty, avg_cost) VALUES (?, ?, ?)",
-                (p.symbol, str(p.qty), str(p.avg_cost)),
+                "INSERT INTO app_state (key, value) VALUES ('broker_cash', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(cash),),
             )
-        await self.db.commit()
+            await self.db.execute("DELETE FROM broker_positions")
+            for p in positions.values():
+                await self.db.execute(
+                    "INSERT INTO broker_positions (symbol, qty, avg_cost) VALUES (?, ?, ?)",
+                    (p.symbol, str(p.qty), str(p.avg_cost)),
+                )
+            await self.db.commit()
 
     async def load_broker(self) -> tuple[int | None, list[Position]]:
         cash_s = await self.get_state("broker_cash", "")

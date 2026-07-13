@@ -83,6 +83,18 @@ def test_exposure_and_equity() -> None:
     assert abs(b.equity(prices) - 1_000_000) <= 1  # 買った直後の評価額は開始資金とほぼ同じ
 
 
+def test_exposure_falls_back_to_avg_cost_when_price_missing() -> None:
+    """価格未取得の銘柄を 0 円評価しない(総エクスポージャの過小評価防止)。"""
+    b = PaperBroker(1_000_000, slippage_bps=0, fee_bps=0)
+    b.restore(
+        800_000,
+        [Position(symbol="BTC_JPY", qty=Decimal("0.02"), avg_cost=Decimal(10_000_000))],
+    )
+    empty: dict[Symbol, int] = {}
+    assert b.exposure(empty) == 200_000  # 取得単価で保守的に評価
+    assert b.exposure({"BTC_JPY": 0}) == 200_000  # 0 円価格も欠損扱い
+
+
 def test_restore_state() -> None:
     b = PaperBroker(1)
     b.restore(

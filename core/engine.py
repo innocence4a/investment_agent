@@ -29,6 +29,7 @@ from core.models import (
     SYMBOLS,
     Candle,
     Kpi,
+    Symbol,
     Thought,
     Ticker,
     TraderDecision,
@@ -108,11 +109,44 @@ class Engine:
             f"エージェント・コア起動({self.settings.mode.upper()} / feed={self.settings.feed}"
             f" / llm={self.settings.llm})"
         )
-        loop_fns: list[Callable[[], Coroutine[Any, Any, None]]] = [
-            self._feed_loop, self._decision_loop, self._equity_loop,
-            self._flush_loop, self._watchdog_loop,
+        loop_fns: list[tuple[str, Callable[[], Coroutine[Any, Any, None]]]] = [
+            ("フィード消費・損切り監視", self._feed_loop),
+            ("LLM 判断サイクル", self._decision_loop),
+            ("資産スナップショット", self._equity_loop),
+            ("ローソク足永続化", self._flush_loop),
+            ("フィード死活監視", self._watchdog_loop),
         ]
-        self._tasks = [asyncio.create_task(fn()) for fn in loop_fns]
+        self._tasks = [
+            asyncio.create_task(self._supervised(name, fn)) for name, fn in loop_fns
+        ]
+
+    async def _supervised(self, name: str, fn: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        """バックグラウンドタスクの監督: 未捕捉例外を通知して再起動する。
+
+        損切り監視(_feed_loop)等が単一の例外で無言停止しないための安全装置。
+        短時間に連続してクラッシュする場合は障害とみなし、新規発注停止に倒す(N-2)。
+        """
+        failures = 0
+        last_failure = 0.0
+        while True:
+            try:
+                await fn()
+                return  # 常駐ループが正常 return することは通常ない
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("バックグラウンドタスク「%s」が例外で停止", name)
+                now = asyncio.get_running_loop().time()
+                failures = failures + 1 if now - last_failure < 120 else 1
+                last_failure = now
+                await self.notifier.send(
+                    f"バックグラウンドタスク「{name}」が例外で停止しました。"
+                    f"再起動します(直近 {failures} 回目)。",
+                    level="error",
+                )
+                if failures >= 3 and not self.gate.halted:
+                    await self.set_halted(True, source=f"システム(タスク「{name}」の連続障害)")
+                await asyncio.sleep(min(2.0**failures, 30.0))
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -225,7 +259,8 @@ class Engine:
     async def _decide_once(self) -> None:
         if not self.market.last_price:
             return
-        if self._feed_stale():
+        stale = self._stale_symbols()
+        if len(stale) == len(SYMBOLS):
             await self._add_thought(
                 Thought(
                     ts=utcnow(), agent="システム", kind="system",
@@ -239,13 +274,12 @@ class Engine:
             self.market, self.broker.positions(),
             cash=self.broker.cash, daily_pnl=daily_pnl, trades_today=trades_today,
             max_trade_notional=self.settings.risk.max_trade_notional_jpy,
+            exclude=stale,  # 途絶中の銘柄は判断材料から除外(古い価格で判断させない)
         )
         decision = await self.agent.decide(context)
-        await self._apply_decision(decision, daily_pnl, trades_today)
+        await self._apply_decision(decision)
 
-    async def _apply_decision(
-        self, d: TraderDecision, daily_pnl: int, trades_today: int
-    ) -> None:
+    async def _apply_decision(self, d: TraderDecision) -> None:
         async with self._trade_lock:
             price = self.market.last_price.get(d.symbol)
             if d.action == "hold" or price is None:
@@ -256,7 +290,21 @@ class Engine:
                     )
                 )
                 return
+            # LLM 応答待ちの間にフィードが途絶した銘柄は、古い価格での約定を拒否する
+            if d.symbol in self._stale_symbols():
+                await self._add_thought(
+                    Thought(
+                        ts=utcnow(), agent="リスクゲート", kind="risk", symbol=d.symbol,
+                        text=f"{d.symbol} の価格フィードが途絶しているため、"
+                        "古い価格での発注を拒否しました(回復後に再判断します)。",
+                        gate="発動(FEED_STALE)",
+                    )
+                )
+                return
             if d.action == "buy":
+                # 日次損益・取引回数は LLM 応答待ちの間に変わり得る(損切り約定等)ため、
+                # 発注直前・ロック内で必ず取り直してからゲートを通す
+                daily_pnl, trades_today = await self._daily_stats()
                 gate = self.gate.check_entry(
                     notional_jpy=d.notional_jpy,
                     exposure_jpy=self.broker.exposure(self.market.last_price),
@@ -405,29 +453,32 @@ class Engine:
             await self.store.upsert_candle(c)
 
     # ── フィード死活監視(F-7 / N-2) ────────────────
-    def _feed_stale(self) -> bool:
-        if not self.market.last_ts:
-            return True
-        latest = max(self.market.last_ts.values())
-        return (utcnow() - latest).total_seconds() > self.settings.feed_stale_sec
+    def _stale_symbols(self) -> set[Symbol]:
+        """フィードが途絶している銘柄の集合(銘柄別に判定)。"""
+        now = utcnow()
+        return {
+            s
+            for s in SYMBOLS
+            if s not in self.market.last_ts
+            or (now - self.market.last_ts[s]).total_seconds() > self.settings.feed_stale_sec
+        }
 
     async def _watchdog_loop(self) -> None:
-        notified = False
+        notified: set[Symbol] = set()
         # 起動直後の未受信は猶予する
         await asyncio.sleep(self.settings.feed_stale_sec)
         while True:
             await asyncio.sleep(10)
-            stale = self._feed_stale()
-            if stale and not notified:
-                notified = True
+            stale = self._stale_symbols()
+            for sym in stale - notified:
                 await self.notifier.send(
-                    f"価格フィードが {self.settings.feed_stale_sec:.0f} 秒以上途絶しています。"
-                    "新規エントリーを停止して回復を待ちます。",
+                    f"{sym} の価格フィードが {self.settings.feed_stale_sec:.0f} 秒以上"
+                    "途絶しています。当該銘柄の新規エントリーを停止して回復を待ちます。",
                     level="error",
                 )
-            elif not stale and notified:
-                notified = False
-                await self.notifier.send("価格フィードが回復しました。")
+            for sym in notified - stale:
+                await self.notifier.send(f"{sym} の価格フィードが回復しました。")
+            notified = stale
 
     # ── ダッシュボード初期スナップショット ──────────
     async def snapshot(self) -> dict[str, Any]:

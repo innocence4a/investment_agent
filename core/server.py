@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -25,7 +27,16 @@ DIST_DIR = Path(__file__).parent.parent / "dashboard" / "dist"
 
 
 class Hub:
-    """接続中の WebSocket クライアント集合と broadcast。"""
+    """接続中の WebSocket クライアント集合と broadcast。
+
+    broadcast はエンジンのフィード消費・損切り監視と同じタスク文脈で呼ばれるため、
+    ここで例外を漏らしたり長時間ブロックしたりしてはならない:
+    - クライアント集合は接続/切断タスクと競合するためスナップショットを反復する
+    - 送信失敗は種類を問わず当該クライアントの切断として扱う
+    - 遅いクライアントはタイムアウトで切り捨てる(1 クライアントが全体を塞がない)
+    """
+
+    SEND_TIMEOUT_SEC = 5.0
 
     def __init__(self) -> None:
         self._clients: set[web.WebSocketResponse] = set()
@@ -34,14 +45,14 @@ class Hub:
         if not self._clients:
             return
         raw = json.dumps(msg, ensure_ascii=False)
-        dead: list[web.WebSocketResponse] = []
-        for ws in self._clients:
+        for ws in list(self._clients):  # イテレーション中の add/remove と競合しないよう複製
             try:
-                await ws.send_str(raw)
-            except ConnectionError:
-                dead.append(ws)
-        for ws in dead:
-            self._clients.discard(ws)
+                async with asyncio.timeout(self.SEND_TIMEOUT_SEC):
+                    await ws.send_str(raw)
+            except Exception:
+                self._clients.discard(ws)
+                with contextlib.suppress(Exception):
+                    await ws.close(code=1011, message=b"send failed")
 
     def add(self, ws: web.WebSocketResponse) -> None:
         self._clients.add(ws)

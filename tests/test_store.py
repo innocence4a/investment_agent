@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from core.models import Candle, Fill, Position, Thought, Timeframe, utcnow
+from core.models import Candle, Fill, Position, Symbol, Thought, Timeframe, utcnow
 from core.store import Store
 
 
@@ -90,6 +90,38 @@ async def test_broker_state_round_trip(store: Store) -> None:
     await store.save_broker(999, {})
     cash, positions = await store.load_broker()
     assert (cash, positions) == (999, [])
+
+
+async def test_incr_state_float_accumulates_atomically(store: Store) -> None:
+    import asyncio
+
+    # 並行加算しても取りこぼさない(LLM 月次コストカウンタの read-modify-write 対策)
+    await asyncio.gather(*(store.incr_state_float("cost", 0.5) for _ in range(20)))
+    assert abs(float(await store.get_state("cost")) - 10.0) < 1e-6
+
+
+async def test_save_broker_is_atomic_under_concurrent_writes(store: Store) -> None:
+    import asyncio
+
+    # save_broker(DELETE→INSERT)と他の書き込みが並行しても部分コミットにならない
+    pos: dict[Symbol, Position] = {
+        "BTC_JPY": Position(symbol="BTC_JPY", qty=Decimal("0.1"), avg_cost=Decimal(1_000_000))
+    }
+
+    async def churn() -> None:
+        for i in range(20):
+            await store.add_equity_snapshot(
+                datetime(2026, 7, 12, 0, 0, i, tzinfo=UTC), 1_000_000, 900_000
+            )
+
+    async def save_repeatedly() -> None:
+        for _ in range(20):
+            await store.save_broker(500_000, pos)
+
+    await asyncio.gather(churn(), save_repeatedly())
+    cash, positions = await store.load_broker()
+    assert cash == 500_000
+    assert len(positions) == 1  # ポジション記録が消えていない
 
 
 async def test_app_state(store: Store) -> None:
