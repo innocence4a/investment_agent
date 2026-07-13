@@ -1,0 +1,826 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Quant — 自動売買ダッシュボード(モック)</title>
+<style>
+  :root{
+    --bg:#0b0e14; --surface:#121722; --surface-2:#181f2c; --line:#222b3a;
+    --ink:#e8edf4; --ink2:#93a1b5; --muted:#5d6a7d;
+    --up:#2aa876; --up-text:#43cf97; --down:#e05560; --down-text:#f2757f;
+    --accent:#5c8ee8; --accent-soft:rgba(92,142,232,.14); --gold:#bb8a26;
+    --sans:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+    --r:10px;
+  }
+  html{color-scheme:dark}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);margin:0;
+       font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .app{max-width:1280px;margin:0 auto;padding:20px 20px 48px;display:flex;flex-direction:column;gap:14px}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+  /* ── header ─────────────────────────── */
+  .topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+          padding:14px 18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.02em}
+  .brand .mark{width:30px;height:30px;border-radius:8px;background:var(--accent-soft);
+               display:grid;place-items:center;color:var(--accent);font-family:var(--mono);font-weight:700}
+  .brand small{display:block;font-weight:400;color:var(--muted);font-size:11px;letter-spacing:.08em}
+  .badge{font-size:11px;font-weight:700;letter-spacing:.12em;padding:4px 10px;border-radius:999px}
+  .badge.paper{color:var(--gold);border:1px solid color-mix(in srgb,var(--gold) 55%,transparent);background:rgba(187,138,38,.12)}
+  .live{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink2)}
+  .live .dot{width:8px;height:8px;border-radius:50%;background:var(--up-text);box-shadow:0 0 0 0 rgba(67,207,151,.5);animation:pulse 2s infinite}
+  @keyframes pulse{70%{box-shadow:0 0 0 9px rgba(67,207,151,0)}100%{box-shadow:0 0 0 0 rgba(67,207,151,0)}}
+  .spacer{flex:1}
+  .clock{color:var(--ink2);font-size:13px}
+  .kill{font:inherit;font-weight:700;font-size:12px;letter-spacing:.06em;cursor:pointer;
+        color:var(--down-text);background:rgba(224,85,96,.12);border:1px solid rgba(224,85,96,.45);
+        border-radius:8px;padding:8px 14px}
+  .kill:hover{background:rgba(224,85,96,.2)}
+  .kill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .halt-banner{display:none;padding:10px 18px;border-radius:var(--r);font-weight:700;
+               background:rgba(224,85,96,.14);border:1px solid rgba(224,85,96,.5);color:var(--down-text)}
+  body.halted .halt-banner{display:block}
+  body.halted .live .dot{background:var(--down-text);animation:none}
+
+  /* ── KPI row ────────────────────────── */
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
+  .kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px 12px}
+  .kpi .label{font-size:11px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+  .kpi .value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:22px;font-weight:700;margin-top:4px}
+  .kpi .sub{font-size:12px;color:var(--ink2);margin-top:2px}
+  .pos{color:var(--up-text)} .neg{color:var(--down-text)}
+
+  /* ── panels & grid ──────────────────── */
+  .grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:14px;align-items:stretch}
+  .col-main{display:flex;flex-direction:column;gap:14px;min-width:0}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+         padding:14px 16px;min-width:0;display:flex;flex-direction:column}
+  .panel-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .panel-head h2{font-size:13px;font-weight:700;letter-spacing:.04em;margin:0}
+  .panel-head .meta{font-size:12px;color:var(--muted)}
+  .tf-tabs{display:flex;gap:2px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:2px}
+  .tf{font:inherit;font-size:11.5px;color:var(--ink2);background:none;border:0;border-radius:6px;padding:3px 9px;cursor:pointer}
+  .tf:hover{color:var(--ink)}
+  .tf.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
+  .tf:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .chart-wrap{position:relative}
+  canvas{display:block;width:100%}
+  #rsiChart,#macdChart{margin-top:8px;border-top:1px solid var(--line);padding-top:6px}
+  .macro{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+  .mtile{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 14px;min-width:0}
+  .mtile .label{font-size:10.5px;letter-spacing:.07em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mtile .value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:15px;font-weight:700;margin-top:2px}
+  .mtile .sub{font-size:11px;margin-top:1px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .tooltip{position:absolute;pointer-events:none;background:var(--surface-2);border:1px solid var(--line);
+           border-radius:8px;padding:8px 10px;font-size:12px;color:var(--ink2);display:none;z-index:5;
+           box-shadow:0 8px 24px rgba(0,0,0,.4);white-space:nowrap}
+  .tooltip .num{color:var(--ink)}
+
+  /* ── 思考ログ ────────────────────────── */
+  .thoughts{max-height:790px}
+  .thought-list{list-style:none;margin:0;padding:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;flex:1}
+  .thought{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+           animation:slidein .35s ease}
+  @keyframes slidein{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+  .thought .row1{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .chip{font-size:11px;font-weight:700;letter-spacing:.08em;padding:2px 9px;border-radius:999px}
+  .chip.buy{color:var(--up-text);background:rgba(42,168,118,.14);border:1px solid rgba(42,168,118,.5)}
+  .chip.sell{color:var(--down-text);background:rgba(224,85,96,.14);border:1px solid rgba(224,85,96,.5)}
+  .chip.skip{color:var(--ink2);background:rgba(147,161,181,.1);border:1px solid var(--line)}
+  .chip.risk{color:#d7a94e;background:rgba(187,138,38,.13);border:1px solid rgba(187,138,38,.5)}
+  .chip.advice{color:#9b87e8;background:rgba(155,135,232,.12);border:1px solid rgba(155,135,232,.45)}
+  .thought .agent{font-size:10.5px;color:var(--muted);letter-spacing:.04em}
+  .thought .t{margin-left:auto;font-size:11px;color:var(--muted)}
+  .thought p{margin:0;font-size:12.5px;color:var(--ink2)}
+  .thought .conf{font-size:11px;color:var(--muted);margin-top:6px}
+  .thought .conf b{color:var(--ink)}
+
+  /* ── bottom: positions + feed ───────── */
+  .bottom{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,4fr) minmax(0,5fr);gap:14px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{font-size:11px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;font-weight:600;
+     text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  td{padding:8px;text-align:right;border-bottom:1px solid var(--line)}
+  tr:last-child td{border-bottom:none}
+  .dir{font-size:11px;font-weight:700;letter-spacing:.06em}
+  .feed{max-height:280px}
+  .feed-list{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1}
+  .fill{display:flex;align-items:center;gap:10px;padding:7px 2px;border-bottom:1px solid var(--line);font-size:12.5px}
+  .fill:last-child{border-bottom:none}
+  .fill .t{color:var(--muted);font-size:11px}
+  .fill .amt{margin-left:auto}
+  .events{max-height:280px}
+  .event{padding:8px 2px;border-bottom:1px solid var(--line);font-size:12.5px}
+  .event:last-child{border-bottom:none}
+  .event .row1{display:flex;align-items:center;gap:8px;margin-bottom:3px}
+  .event p{margin:0;color:var(--ink2)}
+  .imp{font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:1px 7px;border-radius:999px}
+  .imp.hi{color:var(--down-text);background:rgba(224,85,96,.13);border:1px solid rgba(224,85,96,.45)}
+  .imp.mid{color:#d7a94e;background:rgba(187,138,38,.13);border:1px solid rgba(187,138,38,.5)}
+  .imp.lo{color:var(--ink2);background:rgba(147,161,181,.08);border:1px solid var(--line)}
+  .event .src{font-size:11px;color:var(--muted)}
+  .event .t{margin-left:auto;font-size:11px;color:var(--muted)}
+  .sched{border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:4px}
+  .sched-row{display:flex;align-items:center;gap:8px;padding:5px 2px;font-size:12px}
+  .sched-row .sname{color:var(--ink2)}
+  .sched-row .swin{font-size:10px;color:#d7a94e;border:1px solid rgba(187,138,38,.5);border-radius:999px;padding:0 6px;white-space:nowrap}
+  .sched-row .t{margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap}
+  .note{color:var(--muted);font-size:12px;text-align:center}
+
+  @media (max-width:960px){
+    .kpis{grid-template-columns:repeat(2,1fr)}
+    .macro{grid-template-columns:repeat(3,1fr)}
+    .grid,.bottom{grid-template-columns:1fr}
+    .thoughts{max-height:420px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .live .dot{animation:none}
+    .thought{animation:none}
+  }
+</style>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">Q</span>
+      <span>Claude Quant<small>自動売買エージェント</small></span>
+    </div>
+    <span class="badge paper">PAPER</span>
+    <span class="live"><span class="dot"></span><span id="liveLabel">稼働中 · 判断サイクル 5分(デモ: 9秒)</span></span>
+    <span class="spacer"></span>
+    <span class="clock num" id="clock">--:--:-- JST</span>
+    <button class="kill" id="killBtn" type="button">緊急停止</button>
+  </header>
+
+  <div class="halt-banner">⏸ 緊急停止中 — 新規エントリーを停止しています(既存ポジションの決済監視は継続)。「再開する」ボタンで復帰できます。</div>
+
+  <section class="macro" id="macroStrip" aria-label="関連指標"></section>
+
+  <section class="kpis" aria-label="サマリー">
+    <div class="kpi"><div class="label">総資産</div><div class="value num" id="kEquity">¥1,000,000</div><div class="sub num" id="kEquitySub">開始 ¥1,000,000</div></div>
+    <div class="kpi"><div class="label">累計損益</div><div class="value num pos" id="kPnl">+¥0</div><div class="sub num pos" id="kPnlPct">+0.00%</div></div>
+    <div class="kpi"><div class="label">本日損益</div><div class="value num pos" id="kToday">+¥0</div><div class="sub" id="kTodaySub">0 勝 0 敗</div></div>
+    <div class="kpi"><div class="label">勝率</div><div class="value num" id="kWin">—</div><div class="sub num" id="kTrades">取引 0 回</div></div>
+    <div class="kpi"><div class="label">稼働時間</div><div class="value num" id="kUptime">00:00</div><div class="sub">Phase 1 · ペーパートレード</div></div>
+  </section>
+
+  <div class="grid">
+    <div class="col-main">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>BTC / JPY</h2>
+          <div class="tf-tabs" id="tfTabs" role="tablist" aria-label="タイムフレーム"></div>
+          <span class="meta">▲買い ▼売り は5分足に表示 · デモ速度(圧縮)</span>
+          <span class="meta num" id="lastPrice" style="margin-left:auto"></span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="priceChart" height="300" aria-label="BTC/JPY 価格チャート(売買マーカー・移動平均線付き)"></canvas>
+          <div class="tooltip" id="tip"></div>
+        </div>
+        <canvas id="rsiChart" height="64" aria-label="RSI(14)"></canvas>
+        <canvas id="macdChart" height="76" aria-label="MACD(12,26,9)"></canvas>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>資産推移</h2>
+          <span class="meta">エクイティカーブ</span>
+        </div>
+        <canvas id="equityChart" height="150" aria-label="資産推移チャート"></canvas>
+      </section>
+    </div>
+
+    <aside class="panel thoughts">
+      <div class="panel-head">
+        <h2>エージェント思考ログ</h2>
+        <span class="meta">デモ再生 — Phase 1 で Claude の実判断に置換</span>
+      </div>
+      <ul class="thought-list" id="thoughtLog"></ul>
+    </aside>
+  </div>
+
+  <div class="bottom">
+    <section class="panel">
+      <div class="panel-head"><h2>ポジション</h2><span class="meta" id="posMeta"></span></div>
+      <table aria-label="保有ポジション">
+        <thead><tr><th>銘柄</th><th>方向</th><th>数量</th><th>平均取得</th><th>現在値</th><th>評価損益</th></tr></thead>
+        <tbody id="posBody"></tbody>
+      </table>
+    </section>
+    <section class="panel feed">
+      <div class="panel-head"><h2>約定フィード</h2><span class="meta">ライブ</span></div>
+      <ul class="feed-list" id="feedList"></ul>
+    </section>
+    <section class="panel events">
+      <div class="panel-head"><h2>ニュース・イベント</h2><span class="meta">要人発言・経済指標(デモ)</span></div>
+      <div id="schedList" class="sched" aria-label="経済指標カレンダー"></div>
+      <ul class="feed-list" id="eventList"></ul>
+    </section>
+  </div>
+
+  <p class="note">デザインモックアップ — 表示されている価格・取引・損益はすべてダミーデータです。実際の市場データ・売買は Phase 1 実装で接続されます。</p>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const yen = v => '¥' + Math.round(v).toLocaleString('ja-JP');
+  const sign = v => (v >= 0 ? '+' : '−') + yen(Math.abs(v));
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const C = { up: css('--up'), down: css('--down'), upT: css('--up-text'), downT: css('--down-text'),
+              accent: css('--accent'), grid: css('--line'), muted: css('--muted'), ink2: css('--ink2') };
+
+  /* ── 状態 ── */
+  const START = 1_000_000;
+  const RISK = { perTrade: 50_000, dailyLoss: 30_000 };
+  let price = 17_420_000, equity = [], markers = [];
+  let cash = START, btc = 0, avgCost = 0;
+  let wins = 0, losses = 0, todayPnl = 0, halted = false;
+  const t0 = Date.now();
+
+  /* ── タイムフレーム(ボラティリティは √(分数比) でスケール、ticks はデモ圧縮の確定間隔) ── */
+  const VIEW = 24;      // X軸の基準線 24 本 = 表示幅 24 本足(月足なら 2 年分、1時間足なら 24 時間分)
+  const SEED = 160;     // MA99 が表示範囲全体で計算できるだけの履歴
+  const TFS = [
+    { key: '5m', label: '5分',   ticks: 2,  vol: 9_000,   mins: 5 },
+    { key: '1h', label: '1時間', ticks: 5,  vol: 31_000,  mins: 60 },
+    { key: '4h', label: '4時間', ticks: 8,  vol: 62_000,  mins: 240 },
+    { key: '1d', label: '日足',  ticks: 12, vol: 153_000, mins: 1440 },
+    { key: '1w', label: '週足',  ticks: 20, vol: 404_000, mins: 10080 },
+    { key: '1M', label: '月足',  ticks: 30, vol: 837_000, mins: 43200 },
+  ];
+  let activeTf = TFS[0];
+
+  function seedSeries(vol) {
+    const arr = [];
+    let p = price;
+    for (let i = 0; i < SEED; i++) {
+      const o = p, c = o + (Math.random() - 0.495) * vol;
+      arr.push({ o, c, h: Math.max(o, c) + Math.random() * vol * 0.45, l: Math.min(o, c) - Math.random() * vol * 0.45 });
+      p = c;
+    }
+    const off = price - arr[arr.length - 1].c; // 全タイムフレームが同じ現在値で終わるよう平行移動
+    return arr.map(k => ({ o: k.o + off, c: k.c + off, h: k.h + off, l: k.l + off }));
+  }
+  TFS.forEach(tf => { tf.series = seedSeries(tf.vol); tf.count = 0; });
+  const candles = TFS[0].series; // 売買マーカーの基準は 5分足
+  // 資産は取引 0 回で開始するため開始資金のフラットな線
+  equity = Array(70).fill(START);
+
+  /* ── インジケーター計算 ── */
+  function sma(vals, n) {
+    const out = Array(vals.length).fill(null);
+    let s = 0;
+    for (let i = 0; i < vals.length; i++) {
+      s += vals[i];
+      if (i >= n) s -= vals[i - n];
+      if (i >= n - 1) out[i] = s / n;
+    }
+    return out;
+  }
+  function ema(vals, n) {
+    const out = Array(vals.length).fill(null);
+    const k = 2 / (n + 1);
+    let e = null;
+    for (let i = 0; i < vals.length; i++) { e = e === null ? vals[i] : vals[i] * k + e * (1 - k); out[i] = e; }
+    return out;
+  }
+  function rsi(vals, n = 14) {
+    const out = Array(vals.length).fill(null);
+    let ag = 0, al = 0;
+    for (let i = 1; i < vals.length; i++) {
+      const d = vals[i] - vals[i - 1], g = Math.max(d, 0), l = Math.max(-d, 0);
+      if (i <= n) {
+        ag += g; al += l;
+        if (i === n) { ag /= n; al /= n; out[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al)); }
+      } else {
+        ag = (ag * (n - 1) + g) / n; al = (al * (n - 1) + l) / n;
+        out[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al));
+      }
+    }
+    return out;
+  }
+  function macd(vals) {
+    const e12 = ema(vals, 12), e26 = ema(vals, 26);
+    const line = vals.map((_, i) => e12[i] - e26[i]);
+    const signal = ema(line, 9);
+    return { line, signal, hist: line.map((v, i) => v - signal[i]) };
+  }
+
+  /* ── 時計・稼働時間 ── */
+  setInterval(() => {
+    $('clock').textContent = timeStr() + ' JST';
+    const s = Math.floor((Date.now() - t0) / 1000);
+    $('kUptime').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  }, 1000);
+
+  /* ── チャート描画(ローソク足) ── */
+  const pc = $('priceChart'), pctx = pc.getContext('2d');
+  const ec = $('equityChart'), ectx = ec.getContext('2d');
+  const rc = $('rsiChart'), rctx = rc.getContext('2d');
+  const mc = $('macdChart'), mctx = mc.getContext('2d');
+  let hoverIdx = -1;
+
+  /* ── RSI / MACD サブチャート ── */
+  function drawInd() {
+    const closes = activeTf.series.map(k => k.c);
+    { // RSI(14)
+      const { w, h } = fit(rc);
+      const pad = { l: 8, r: 86, t: 6, b: 6 };
+      const bw = (w - pad.l - pad.r) / VIEW;
+      const vals = rsi(closes).slice(-VIEW);
+      const y = v => pad.t + (100 - v) / 100 * (h - pad.t - pad.b);
+      rctx.clearRect(0, 0, w, h);
+      rctx.fillStyle = 'rgba(92,142,232,.06)';
+      rctx.fillRect(pad.l, y(70), w - pad.l - pad.r, y(30) - y(70));
+      rctx.strokeStyle = C.grid; rctx.setLineDash([3, 3]);
+      [30, 70].forEach(v => { rctx.beginPath(); rctx.moveTo(pad.l, y(v)); rctx.lineTo(w - pad.r, y(v)); rctx.stroke(); });
+      rctx.setLineDash([]);
+      rctx.strokeStyle = '#d7a94e'; rctx.lineWidth = 1.5;
+      rctx.beginPath(); let st = false;
+      vals.forEach((v, i) => {
+        if (v === null) return;
+        const x = pad.l + i * bw + bw / 2;
+        st ? rctx.lineTo(x, y(v)) : (rctx.moveTo(x, y(v)), st = true);
+      });
+      rctx.stroke();
+      rctx.font = '10.5px ui-monospace,Menlo,monospace'; rctx.textAlign = 'left';
+      rctx.fillStyle = C.ink2; rctx.fillText('RSI(14)', pad.l + 4, pad.t + 9);
+      const cur = vals[vals.length - 1];
+      if (cur !== null) {
+        rctx.fillStyle = cur >= 70 ? C.downT : cur <= 30 ? C.upT : C.ink2;
+        rctx.fillText(cur.toFixed(1), w - pad.r + 8, y(cur) + 4);
+      }
+    }
+    { // MACD(12,26,9)
+      const { w, h } = fit(mc);
+      const pad = { l: 8, r: 86, t: 6, b: 6 };
+      const bw = (w - pad.l - pad.r) / VIEW;
+      const m = macd(closes);
+      const line = m.line.slice(-VIEW), sig = m.signal.slice(-VIEW), hist = m.hist.slice(-VIEW);
+      const ex = Math.max(...[...line, ...sig, ...hist].filter(v => v !== null).map(Math.abs), 1);
+      const y = v => pad.t + (ex - v) / (2 * ex) * (h - pad.t - pad.b);
+      mctx.clearRect(0, 0, w, h);
+      mctx.strokeStyle = C.grid;
+      mctx.beginPath(); mctx.moveTo(pad.l, y(0)); mctx.lineTo(w - pad.r, y(0)); mctx.stroke();
+      hist.forEach((v, i) => {
+        if (v === null) return;
+        const x = pad.l + i * bw + bw / 2, y0 = y(0), y1 = y(v);
+        mctx.fillStyle = v >= 0 ? 'rgba(42,168,118,.5)' : 'rgba(224,85,96,.5)';
+        mctx.fillRect(x - bw * 0.28, Math.min(y0, y1), bw * 0.56, Math.max(1, Math.abs(y1 - y0)));
+      });
+      [[line, C.accent], [sig, '#d7a94e']].forEach(([vals, col]) => {
+        mctx.strokeStyle = col; mctx.lineWidth = 1.5;
+        mctx.beginPath(); let st = false;
+        vals.forEach((v, i) => {
+          if (v === null) return;
+          const x = pad.l + i * bw + bw / 2;
+          st ? mctx.lineTo(x, y(v)) : (mctx.moveTo(x, y(v)), st = true);
+        });
+        mctx.stroke();
+      });
+      mctx.font = '10.5px ui-monospace,Menlo,monospace'; mctx.textAlign = 'left';
+      mctx.fillStyle = C.ink2; mctx.fillText('MACD(12,26,9)', pad.l + 4, pad.t + 9);
+    }
+  }
+
+  function fit(cv) {
+    if (!cv._h) cv._h = +cv.getAttribute('height'); // 論理高さは初回に固定(DPR 反映後の height 属性を再読込すると倍々に肥大する)
+    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv._h;
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; cv.style.height = h + 'px'; }
+    cv.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w, h };
+  }
+
+  const MAS = [
+    { n: 7,  color: '#d7a94e' },
+    { n: 25, color: '#5c8ee8' },
+    { n: 99, color: '#9b87e8' },
+  ];
+  const tfTimeLabel = (t) => {
+    const d = new Date(t);
+    if (activeTf.mins < 1440) return d.toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+    if (activeTf.mins < 43200) return `${d.getMonth() + 1}/${d.getDate()}`;
+    return `${String(d.getFullYear()).slice(2)}/${d.getMonth() + 1}`;
+  };
+
+  function drawPrice() {
+    const { w, h } = fit(pc);
+    const s = activeTf.series;
+    const view = s.slice(-VIEW);
+    const pad = { l: 8, r: 86, t: 10, b: 24 };
+    const closes = s.map(k => k.c);
+    const maLines = MAS.map(ma => sma(closes, ma.n).slice(-VIEW));
+    const maVals = maLines.flat().filter(v => v !== null);
+    const lo = Math.min(...view.map(c => c.l), ...maVals), hi = Math.max(...view.map(c => c.h), ...maVals);
+    const y = v => pad.t + (hi - v) / (hi - lo) * (h - pad.t - pad.b);
+    const bw = (w - pad.l - pad.r) / view.length;
+
+    pctx.clearRect(0, 0, w, h);
+    // グリッド(横4本)+ 右軸ラベル
+    pctx.strokeStyle = C.grid; pctx.lineWidth = 1;
+    pctx.fillStyle = C.muted; pctx.font = '11px ui-monospace,Menlo,monospace'; pctx.textAlign = 'left';
+    for (let i = 0; i <= 4; i++) {
+      const v = hi - (hi - lo) * i / 4, gy = y(v);
+      pctx.beginPath(); pctx.moveTo(pad.l, gy); pctx.lineTo(w - pad.r, gy); pctx.stroke();
+      pctx.fillText(yen(v), w - pad.r + 8, gy + 4);
+    }
+    // X軸: 基準線 24 本(1本足ごと)+ 時刻ラベル(4本ごと)
+    const base = s.length - view.length;
+    const now = Date.now(), tfMs = activeTf.mins * 60_000;
+    pctx.textAlign = 'center';
+    view.forEach((_, i) => {
+      const x = pad.l + i * bw + bw / 2;
+      pctx.strokeStyle = C.grid; pctx.globalAlpha = 0.55;
+      pctx.beginPath(); pctx.moveTo(x, pad.t); pctx.lineTo(x, h - pad.b); pctx.stroke();
+      pctx.globalAlpha = 1;
+      if ((base + i) % 4 === 0) {
+        pctx.fillStyle = C.muted;
+        pctx.fillText(tfTimeLabel(now - (view.length - 1 - i) * tfMs), x, h - 8);
+      }
+    });
+    // 移動平均線 3 本(MA7/MA25/MA99)
+    MAS.forEach((ma, mi) => {
+      const line = maLines[mi];
+      pctx.strokeStyle = ma.color; pctx.lineWidth = 1.5;
+      pctx.beginPath();
+      let started = false;
+      line.forEach((v, i) => {
+        if (v === null) return;
+        const x = pad.l + i * bw + bw / 2;
+        if (!started) { pctx.moveTo(x, y(v)); started = true; } else pctx.lineTo(x, y(v));
+      });
+      pctx.stroke();
+    });
+    // MA 凡例(値はテキストトークン、色はマーカー)
+    pctx.textAlign = 'left'; pctx.font = '10.5px ui-monospace,Menlo,monospace';
+    let lx = pad.l + 4;
+    MAS.forEach(ma => {
+      pctx.fillStyle = ma.color; pctx.fillRect(lx, pad.t + 2, 8, 2.5);
+      pctx.fillStyle = C.ink2; pctx.fillText(`MA${ma.n}`, lx + 11, pad.t + 7);
+      lx += 52;
+    });
+    // ローソク
+    view.forEach((c, i) => {
+      const x = pad.l + i * bw + bw / 2, up = c.c >= c.o;
+      pctx.strokeStyle = pctx.fillStyle = up ? C.up : C.down;
+      pctx.lineWidth = 1;
+      pctx.beginPath(); pctx.moveTo(x, y(c.h)); pctx.lineTo(x, y(c.l)); pctx.stroke();
+      const bh = Math.max(1.5, Math.abs(y(c.o) - y(c.c)));
+      pctx.fillRect(x - bw * 0.32, Math.min(y(c.o), y(c.c)), bw * 0.64, bh);
+    });
+    // 売買マーカー(▲▼ + 記号で方向を二重符号化)。取引は 5分足基準のため他の足では非表示
+    if (activeTf === TFS[0]) {
+      markers.filter(m => m.i >= base).forEach(m => {
+        const i = m.i - base, c = view[i]; if (!c) return;
+        const x = pad.l + i * bw + bw / 2;
+        pctx.font = 'bold 11px ui-monospace,Menlo,monospace'; pctx.textAlign = 'center';
+        if (m.side === 'buy') { pctx.fillStyle = C.upT; pctx.fillText('▲', x, y(c.l) + 14); }
+        else { pctx.fillStyle = C.downT; pctx.fillText('▼', x, y(c.h) - 6); }
+      });
+    }
+    // 現在値ライン+タグ
+    const last = view[view.length - 1];
+    pctx.setLineDash([4, 4]); pctx.strokeStyle = C.ink2;
+    pctx.beginPath(); pctx.moveTo(pad.l, y(last.c)); pctx.lineTo(w - pad.r, y(last.c)); pctx.stroke();
+    pctx.setLineDash([]);
+    const tagY = y(last.c), upNow = last.c >= last.o;
+    pctx.fillStyle = upNow ? C.up : C.down;
+    pctx.beginPath();
+    if (pctx.roundRect) pctx.roundRect(w - pad.r + 2, tagY - 10, pad.r - 6, 20, 5); // Safari 16 未満には未実装
+    else pctx.rect(w - pad.r + 2, tagY - 10, pad.r - 6, 20);
+    pctx.fill();
+    pctx.fillStyle = '#fff'; pctx.textAlign = 'left';
+    pctx.fillText(yen(last.c), w - pad.r + 8, tagY + 4);
+    // ホバー十字線
+    if (hoverIdx >= 0 && hoverIdx < view.length) {
+      const x = pad.l + hoverIdx * bw + bw / 2;
+      pctx.strokeStyle = C.muted; pctx.setLineDash([3, 3]);
+      pctx.beginPath(); pctx.moveTo(x, pad.t); pctx.lineTo(x, h - pad.b); pctx.stroke();
+      pctx.setLineDash([]);
+    }
+    pc._geom = { pad, bw, view };
+  }
+
+  function drawEquity() {
+    const { w, h } = fit(ec);
+    const view = equity.slice(-160);
+    const pad = { l: 8, r: 86, t: 8, b: 8 };
+    const lo = Math.min(...view, START) - 400, hi = Math.max(...view, START) + 400;
+    const y = v => pad.t + (hi - v) / (hi - lo) * (h - pad.t - pad.b);
+    const x = i => pad.l + i / (view.length - 1) * (w - pad.l - pad.r);
+    ectx.clearRect(0, 0, w, h);
+    // 開始ライン
+    ectx.strokeStyle = C.grid; ectx.setLineDash([4, 4]);
+    ectx.beginPath(); ectx.moveTo(pad.l, y(START)); ectx.lineTo(w - pad.r, y(START)); ectx.stroke();
+    ectx.setLineDash([]);
+    ectx.font = '11px ui-monospace,Menlo,monospace';
+    // エリア+ライン
+    const grad = ectx.createLinearGradient(0, pad.t, 0, h);
+    grad.addColorStop(0, 'rgba(92,142,232,.28)'); grad.addColorStop(1, 'rgba(92,142,232,0)');
+    ectx.beginPath(); ectx.moveTo(x(0), h - pad.b);
+    view.forEach((v, i) => ectx.lineTo(x(i), y(v)));
+    ectx.lineTo(x(view.length - 1), h - pad.b); ectx.closePath();
+    ectx.fillStyle = grad; ectx.fill();
+    ectx.beginPath();
+    view.forEach((v, i) => i ? ectx.lineTo(x(i), y(v)) : ectx.moveTo(x(i), y(v)));
+    ectx.strokeStyle = C.accent; ectx.lineWidth = 2; ectx.stroke();
+    // 終端ドット+現在値
+    const lv = view[view.length - 1];
+    ectx.fillStyle = C.accent;
+    ectx.beginPath(); ectx.arc(x(view.length - 1), y(lv), 3.5, 0, 7); ectx.fill();
+    if (Math.abs(y(lv) - y(START)) >= 14) { // 現在値と近接する間は開始ラベルを省略して重なりを防ぐ
+      ectx.fillStyle = C.muted;
+      ectx.fillText(yen(START), w - pad.r + 8, y(START) + 4);
+    }
+    ectx.fillStyle = lv >= START ? C.upT : C.downT;
+    ectx.fillText(yen(lv), w - pad.r + 8, y(lv) + 4);
+  }
+
+  /* ── ホバーツールチップ ── */
+  const tip = $('tip');
+  let lastMouse = null; // ローソクが流れてもツールチップとカーソル位置がずれないよう、tick 側からも再解決する
+  function resolveHover(mx, my) {
+    const g = pc._geom; if (!g) return;
+    const r = pc.getBoundingClientRect();
+    hoverIdx = Math.floor((mx - g.pad.l) / g.bw);
+    const c = g.view[hoverIdx];
+    if (!c || mx > r.width - g.pad.r) { tip.style.display = 'none'; hoverIdx = -1; drawPrice(); return; }
+    tip.style.display = 'block';
+    tip.style.left = Math.min(mx + 14, r.width - 190) + 'px';
+    tip.style.top = (my + 14) + 'px';
+    tip.innerHTML = `始値 <span class="num">${yen(c.o)}</span><br>高値 <span class="num">${yen(c.h)}</span><br>安値 <span class="num">${yen(c.l)}</span><br>終値 <span class="num">${yen(c.c)}</span>`;
+    drawPrice();
+  }
+  pc.addEventListener('mousemove', e => {
+    const r = pc.getBoundingClientRect();
+    lastMouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+    resolveHover(lastMouse.x, lastMouse.y);
+  });
+  pc.addEventListener('mouseleave', () => { lastMouse = null; tip.style.display = 'none'; hoverIdx = -1; drawPrice(); });
+
+  /* ── KPI・テーブル更新 ── */
+  function equityNow() { return cash + btc * price; }
+  function refresh() {
+    const eq = equityNow(), pnl = eq - START, pct = pnl / START * 100;
+    $('kEquity').textContent = yen(eq);
+    const set = (id, v, fmt) => { const el = $(id); el.textContent = fmt; el.classList.toggle('pos', v >= 0); el.classList.toggle('neg', v < 0); };
+    set('kPnl', pnl, sign(pnl));
+    set('kPnlPct', pnl, (pnl >= 0 ? '+' : '−') + Math.abs(pct).toFixed(2) + '%');
+    set('kToday', todayPnl, sign(todayPnl));
+    $('kTodaySub').textContent = `${wins} 勝 ${losses} 敗`;
+    const n = wins + losses;
+    $('kWin').textContent = n ? (wins / n * 100).toFixed(1) + '%' : '—';
+    $('kTrades').textContent = `取引 ${n} 回`;
+    $('lastPrice').textContent = yen(price);
+    // ポジション表
+    const tb = $('posBody');
+    if (btc > 0) {
+      const upnl = (price - avgCost) * btc, cls = upnl >= 0 ? 'pos' : 'neg';
+      tb.innerHTML = `<tr><td>BTC/JPY</td><td class="dir pos">ロング</td><td class="num">${btc.toFixed(4)}</td>
+        <td class="num">${yen(avgCost)}</td><td class="num">${yen(price)}</td>
+        <td class="num ${cls}">${sign(upnl)}</td></tr>`;
+      $('posMeta').textContent = '1 件';
+    } else {
+      tb.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted)">ポジションなし — 次の判断サイクルを待機中</td></tr>`;
+      $('posMeta').textContent = '0 件';
+    }
+  }
+
+  /* ── 思考ログ・約定 ── */
+  const REASONS = {
+    buy: [
+      '5分足の RSI が 31 まで低下した後に反発を確認。直近サポートを維持しており、短期リバウンド狙いで小口エントリーします。',
+      '出来高を伴って直近高値をブレイク。モメンタム継続と判断し、リスク上限内でロングを追加します。',
+      '急落後の出来高減衰と下ヒゲ連続を確認。売り圧力の枯れと判断し、打診買いを入れます。',
+      'ゴールドが軟調な一方で株先物が堅調。リスクオンの資金フローが観測されるため、BTC への追い風と判断して小口エントリーします。',
+    ],
+    sell: [
+      '目標利幅 +0.4% に到達。上値には厚い売り板が控えており、ルール通り利確します。',
+      '損切りライン −0.3% に接触。ルールに従いポジションをクローズし、次のセットアップを待ちます。',
+      '短期指標が過熱圏(RSI 74)に到達。伸び代よりも反落リスクが上回ると判断し、全量を利確します。',
+    ],
+    skip: [
+      '米 CPI 発表を控えボラティリティ拡大が見込まれるため、新規エントリーは見送り。既存ポジションのみ監視します。',
+      'レンジ中央で優位性のあるセットアップがありません。エッジのない取引はしない方針に従い、様子見します。',
+      '直近 2 連敗のため、ルールに基づきポジションサイズを半分に制限中。基準を満たすシグナルが出るまで待機します。',
+      '恐怖指数(VIX)が上昇しドル指数も強含み。リスクオフの資金フローが警戒されるため、新規エントリーを見送ります。',
+    ],
+    risk: [
+      '取引頻度が設定上限に近づいています。以降のシグナルはポジションサイズを段階的に制限します。',
+    ],
+    advice: [
+      '本日の地合い: VIX は低位、株先物も堅調でリスクオンが継続。トレンドフォロー優位の環境で、現在のポジションサイズ設定は適切と見ています。',
+      '直近の判断ログをレビューしました。見送り判断の質は良好ですが、利確がやや早い傾向があります。目標利幅の見直しを次回の日次レビューで提案します。',
+      'ゴールドの軟調とドル指数の横ばいから、資金は依然リスク資産に向かっています。BTC の押し目は拾いやすい地合いという見立てです。',
+    ],
+  };
+  const timeStr = () => new Date().toLocaleTimeString('ja-JP', { hour12: false, timeZone: 'Asia/Tokyo' });
+  function prependCapped(ul, li, max) {
+    ul.prepend(li);
+    while (ul.children.length > max) ul.lastChild.remove();
+  }
+  // opts.system: オペレーター/システム由来のカード(確信度・リスクゲート表記なし)
+  // opts.gate  : リスクゲートの結果表記(省略時 '通過')
+  // opts.agent : 発言エージェント名の上書き(省略時は kind から自動)
+  const KIND_META = {
+    buy:    { label: '買い',   chip: 'buy',    agent: 'トレーダー' },
+    sell:   { label: '売り',   chip: 'sell',   agent: 'トレーダー' },
+    skip:   { label: '見送り', chip: 'skip',   agent: 'トレーダー' },
+    risk:   { label: '抑制',   chip: 'risk',   agent: 'リスク管理' },
+    advice: { label: '所感',   chip: 'advice', agent: '相談役' },
+    system: { label: 'システム', chip: 'skip',  agent: '' },
+  };
+  function pushThought(kind, extra, opts = {}) {
+    const li = document.createElement('li');
+    li.className = 'thought';
+    const meta = KIND_META[kind];
+    const pool = REASONS[kind];
+    const agent = opts.agent ?? meta.agent;
+    const footer = (opts.system || kind === 'advice') ? '' :
+      `<div class="conf">確信度 <b class="num">${58 + Math.floor(Math.random() * 34)}%</b> · リスクゲート: ${opts.gate || '通過'}</div>`;
+    li.innerHTML = `<div class="row1"><span class="chip ${meta.chip}">${meta.label}</span>
+      ${agent ? `<span class="agent">${agent}</span>` : ''}
+      <span class="t num">${timeStr()}</span></div>
+      <p>${extra || pool[Math.floor(Math.random() * pool.length)]}</p>${footer}`;
+    prependCapped($('thoughtLog'), li, 12);
+  }
+  function pushFill(side, qty, px) {
+    const li = document.createElement('li');
+    li.className = 'fill';
+    const cls = side === 'buy' ? 'pos' : 'neg', mark = side === 'buy' ? '▲ 買' : '▼ 売';
+    li.innerHTML = `<span class="t num">${timeStr()}</span>
+      <span class="${cls}" style="font-weight:700">${mark}</span>
+      <span>BTC <span class="num">${qty.toFixed(4)}</span></span>
+      <span class="amt num">${yen(px)}</span>`;
+    prependCapped($('feedList'), li, 14);
+  }
+
+  /* ── シミュレーション ── */
+  function tickPrice() {
+    price += (Math.random() - 0.495) * 4500;
+    TFS.forEach(tf => {
+      const s = tf.series, last = s[s.length - 1];
+      last.c = price; last.h = Math.max(last.h, price); last.l = Math.min(last.l, price);
+      if (++tf.count >= tf.ticks) {
+        tf.count = 0;
+        s.push({ o: price, c: price, h: price, l: price });
+        if (s.length > 400) {
+          s.shift();
+          if (tf === TFS[0]) { markers.forEach(m => m.i--); markers = markers.filter(m => m.i >= 0); }
+        }
+      }
+    });
+    equity.push(equityNow());
+    if (equity.length > 600) equity.shift();
+    drawPrice(); drawInd(); drawEquity(); refresh();
+    if (lastMouse) resolveHover(lastMouse.x, lastMouse.y);
+  }
+
+  function agentCycle() {
+    if (halted && btc === 0) return; // 停止中は新規エントリーなし。既存ポジションの決済監視のみ継続
+    const r = Math.random();
+    if (!halted && btc === 0 && r < 0.45) {          // エントリー
+      if (todayPnl <= -RISK.dailyLoss) {
+        pushThought('risk', `日次損失が上限(${yen(RISK.dailyLoss)})に到達しているため、新規エントリーを拒否しました。本日は決済のみ行います。`, { gate: '発動(日次損失上限)' });
+        return;
+      }
+      const notional = 20_000 + Math.random() * (RISK.perTrade - 22_000); // 1取引上限の範囲内
+      const qty = +(notional / price).toFixed(4);
+      avgCost = price; btc = qty; cash -= qty * price;
+      markers.push({ i: candles.length - 1, side: 'buy' });
+      pushThought('buy'); pushFill('buy', qty, price);
+    } else if (btc > 0 && r < 0.5) {      // クローズ
+      const pnl = (price - avgCost) * btc;
+      cash += btc * price;
+      markers.push({ i: candles.length - 1, side: 'sell' });
+      pushThought('sell'); pushFill('sell', btc, price);
+      todayPnl += pnl; pnl >= 0 ? wins++ : losses++;
+      btc = 0; avgCost = 0;
+    } else if (!halted) {
+      pushThought('skip');
+    }
+    refresh();
+  }
+
+  /* ── 経済カレンダー(スケジュール管理。デモ)── */
+  const SCHED = [
+    { label: '米雇用統計(NFP)', imp: 'hi',  at: t0 + 2.2 * 3600_000, window: '前後30分 取引抑制' },
+    { label: 'FOMC 議事要旨',    imp: 'mid', at: t0 + 8.5 * 3600_000, window: '' },
+    { label: '米CPI(7月)',      imp: 'hi',  at: t0 + 26 * 3600_000,  window: '前後30分 取引抑制' },
+  ];
+  const cd = ms => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  function renderSched() {
+    $('schedList').innerHTML = SCHED.map(ev => {
+      const t = new Date(ev.at).toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+      return `<div class="sched-row"><span class="imp ${ev.imp}">${ev.imp === 'hi' ? '高' : '中'}</span>
+        <span class="sname">${ev.label}</span>${ev.window ? `<span class="swin">${ev.window}</span>` : ''}
+        <span class="t num">${t} · あと ${cd(ev.at - Date.now())}</span></div>`;
+    }).join('');
+  }
+
+  /* ── 関連指標(恐怖指数・ゴールド等。デモ)── */
+  const MACRO = [
+    { label: 'FEAR & GREED', v: 62, step: 1.5, fmt: v => Math.round(v),
+      sub: v => v >= 75 ? '極端な強欲' : v >= 55 ? '強欲' : v >= 45 ? '中立' : v >= 25 ? '恐怖' : '極端な恐怖' },
+    { label: '恐怖指数 VIX', v: 18.4, step: 0.25, fmt: v => v.toFixed(1) },
+    { label: 'ゴールド USD/oz', v: 3324, step: 5, fmt: v => Math.round(v).toLocaleString('en-US') },
+    { label: 'S&P500 先物', v: 6128, step: 6, fmt: v => Math.round(v).toLocaleString('en-US') },
+    { label: 'ドル指数 DXY', v: 103.4, step: 0.08, fmt: v => v.toFixed(1) },
+    { label: '米10年金利', v: 4.23, step: 0.015, fmt: v => v.toFixed(2) + '%' },
+  ];
+  MACRO.forEach(m => { m.v0 = m.v; });
+  function renderMacro() {
+    $('macroStrip').innerHTML = MACRO.map(m => {
+      const d = (m.v - m.v0) / m.v0 * 100;
+      const cls = d >= 0 ? 'pos' : 'neg';
+      const sub = m.sub ? m.sub(m.v) : `${d >= 0 ? '▲' : '▼'} ${Math.abs(d).toFixed(2)}%`;
+      return `<div class="mtile"><div class="label">${m.label}</div>
+        <div class="value">${m.fmt(m.v)}</div>
+        <div class="sub ${m.sub ? '' : cls}">${sub}</div></div>`;
+    }).join('');
+  }
+  function tickMacro() {
+    MACRO.forEach(m => { m.v += (Math.random() - 0.5) * m.step * 2; });
+    renderMacro();
+  }
+
+  /* ── ニュース・イベント(デモ)── */
+  const EVENTS = [
+    { imp: 'hi',  label: '高', src: 'X / 要人', text: '米大統領が対中関税の引き上げを示唆するポストを投稿',
+      react: '要人ポストを検知(対中関税示唆)。ボラティリティ急拡大の恐れがあるため、新規エントリーを一時停止し価格反応を確認します。' },
+    { imp: 'hi',  label: '高', src: '要人発言', text: 'FRB議長「利下げを急ぐ状況にはない」— 講演ヘッドライン',
+      react: 'FRB議長のタカ派発言を検知。リスク資産に売り圧力が想定されるため、新規エントリーを一時停止します。' },
+    { imp: 'hi',  label: '高', src: '経済指標', text: '米CPI(6月)前年比 +3.1%、市場予想 +2.9% を上回る',
+      react: 'CPI が予想を上回りました。発表直後のスパイクが収まるまで新規エントリーを停止し、方向性が出たら再評価します。' },
+    { imp: 'mid', label: '中', src: 'X / 要人', text: '財務長官がステーブルコイン規制法案への支持を表明', react: null },
+    { imp: 'mid', label: '中', src: '経済指標', text: '米新規失業保険申請件数は市場予想の範囲内', react: null },
+    { imp: 'mid', label: '中', src: 'ニュース', text: '大手取引所で一時的な出金遅延の報告、原因調査中', react: null },
+    { imp: 'lo',  label: '低', src: 'ニュース', text: '主要アルトコインの大型アップグレード日程が確定', react: null },
+    { imp: 'lo',  label: '低', src: 'ニュース', text: '海外運用大手が四半期レポートで BTC 保有比率を維持', react: null },
+  ];
+  function pushEvent() {
+    const ev = EVENTS[Math.floor(Math.random() * EVENTS.length)];
+    const li = document.createElement('li');
+    li.className = 'event';
+    li.innerHTML = `<div class="row1"><span class="imp ${ev.imp}">${ev.label}</span>
+      <span class="src">${ev.src}</span><span class="t num">${timeStr()}</span></div>
+      <p>${ev.text}</p>`;
+    prependCapped($('eventList'), li, 10);
+    // 高インパクトはイベントドリブン判断: 定期サイクルを待たずリスク管理エージェントが防御反応
+    if (ev.react && !halted) setTimeout(() => pushThought('risk', ev.react, { gate: 'イベント警戒' }), 1600);
+  }
+
+  /* ── 緊急停止 ── */
+  $('killBtn').addEventListener('click', () => {
+    halted = !halted;
+    document.body.classList.toggle('halted', halted);
+    $('killBtn').textContent = halted ? '再開する' : '緊急停止';
+    $('liveLabel').textContent = halted ? '停止中(決済監視は継続)' : '稼働中 · 判断サイクル 5分(デモ: 9秒)';
+    pushThought('system', halted
+      ? 'オペレーターにより緊急停止が実行されました。新規エントリーを停止します(既存ポジションの決済監視は継続)。'
+      : 'オペレーターにより再開されました。次の判断サイクルから通常運転に戻ります。', { system: true });
+  });
+
+  /* ── タイムフレーム切替 ── */
+  const tabsEl = $('tfTabs');
+  TFS.forEach(tf => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'tf'; b.textContent = tf.label;
+    b.setAttribute('role', 'tab');
+    b.addEventListener('click', () => {
+      activeTf = tf;
+      [...tabsEl.children].forEach(x => x.classList.toggle('on', x === b));
+      hoverIdx = -1; tip.style.display = 'none';
+      drawPrice(); drawInd();
+    });
+    tabsEl.appendChild(b);
+  });
+  tabsEl.firstChild.classList.add('on');
+
+  window.addEventListener('resize', () => { drawPrice(); drawInd(); drawEquity(); });
+
+  /* 起動 */
+  pushThought('system', `エージェント起動。ペーパートレードモードで BTC/JPY の監視を開始します。リスク上限: 1取引 ${yen(RISK.perTrade)} / 日次損失 ${yen(RISK.dailyLoss)}。`, { system: true });
+  drawPrice(); drawInd(); drawEquity(); refresh(); renderMacro();
+  setInterval(tickPrice, 2000);
+  setInterval(tickMacro, 5000);
+  setInterval(agentCycle, 9000);
+  setTimeout(agentCycle, 2500);
+  setInterval(pushEvent, 16000);
+  setTimeout(pushEvent, 5000);
+  renderSched();
+  setInterval(renderSched, 1000);
+  setInterval(() => { if (!halted) pushThought('advice'); }, 42000);
+  setTimeout(() => { if (!halted) pushThought('advice'); }, 13000);
+  // カレンダー連動の抑制デモ(実装では発表 30 分前に自動発動)
+  setTimeout(() => { if (!halted) pushThought('risk',
+    '経済カレンダー連動(デモ): 米雇用統計(NFP)の発表が近づいた際は、発表前後 30 分の新規エントリーを自動で抑制し、既存ポジションのサイズ縮小を検討します。',
+    { gate: '発動(指標前抑制)' }); }, 30000);
+})();
+</script>

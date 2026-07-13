@@ -1,0 +1,49 @@
+[project]
+name = "investment-agent-core"
+version = "0.1.0"
+description = "AI エージェント自動売買システム(Phase 1: ペーパートレード)のエージェント・コア"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.10",
+    "aiosqlite>=0.20",
+    "anthropic>=0.40",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "RUF"]
+# 日本語ドキュメント・UI 文言で使う記号(×, −, ℹ など)を誤検知しない
+allowed-confusables = ["×", "−", "ℹ", "・"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["core", "tests"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
