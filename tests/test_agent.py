@@ -92,6 +92,24 @@ async def test_cost_limit_stops_decisions(store: Store) -> None:
     assert len(fake.calls) == 1  # 2 回目は API を呼ばない
 
 
+async def test_max_tokens_truncation_falls_back_to_hold(store: Store) -> None:
+    # 途中で切れた JSON(stop_reason=max_tokens)→ 見送り + 日本語根拠(発注しない)
+    agent = AnthropicTraderAgent(make_settings(), store)
+    patch_client(agent, FakeMessages('{"action": "buy", "sym', stop_reason="max_tokens"))
+    d = await agent.decide(CONTEXT)
+    assert d.action == "hold"
+    assert "途中" in d.reason
+
+
+async def test_invalid_json_falls_back_to_hold(store: Store) -> None:
+    # スキーマ不一致・壊れた JSON → ValidationError を握って見送りに倒す
+    agent = AnthropicTraderAgent(make_settings(), store)
+    patch_client(agent, FakeMessages('{"action": "buy"}'))  # 必須フィールド欠落
+    d = await agent.decide(CONTEXT)
+    assert d.action == "hold"
+    assert d.reason
+
+
 async def test_refusal_falls_back_to_hold(store: Store) -> None:
     agent = AnthropicTraderAgent(make_settings(), store)
     patch_client(agent, FakeMessages("", stop_reason="refusal"))
@@ -113,6 +131,8 @@ async def test_api_error_is_logged_and_reraised(store: Store) -> None:
     cur = await store.db.execute("SELECT ok FROM api_log")
     rows = list(await cur.fetchall())
     assert rows[0]["ok"] == 0
+    # 失敗呼び出しも概算コストを計上する(タイムアウト等でもサーバー側課金があり得る)
+    assert await agent.monthly_cost_usd() > 0
 
 
 # ── MockTraderAgent(ルールベース) ──────────────────────
@@ -141,17 +161,27 @@ async def test_mock_closes_on_overbought_rsi() -> None:
     assert d.action == "close"
 
 
-async def test_mock_warmup_buys_at_recent_low_without_rsi() -> None:
-    # RSI(14) が揃うまでの検証用フォールバック: 直近安値タッチで小口打診買い
+async def test_mock_warmup_buys_on_dip_without_rsi() -> None:
+    # RSI(14) が揃うまでの検証用フォールバック: 足内押し目・直近安値で小口打診買い
     ctx = {
         "cash_jpy": 1_000_000, "max_trade_notional_jpy": 50_000,
         "symbols": {"BTC_JPY": {
-            "rsi14": None, "price_jpy": 990, "closes_5m_last12": [1000, 995], "position": None,
+            "rsi14": None, "price_jpy": 990, "open_5m": 1000,
+            "closes_5m_last12": [990], "position": None,
         }},
     }
     d = await MockTraderAgent().decide(ctx)
     assert d.action == "buy"
     assert d.notional_jpy <= 20_000
+    # 押し目でなければ買わない
+    ctx2 = {
+        "cash_jpy": 1_000_000, "max_trade_notional_jpy": 50_000,
+        "symbols": {"BTC_JPY": {
+            "rsi14": None, "price_jpy": 1_010, "open_5m": 1000,
+            "closes_5m_last12": [1010], "position": None,
+        }},
+    }
+    assert (await MockTraderAgent().decide(ctx2)).action == "hold"
 
 
 async def test_mock_warmup_closes_at_small_move() -> None:

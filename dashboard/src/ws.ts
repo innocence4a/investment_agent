@@ -33,15 +33,20 @@ export function connect(
   open();
 }
 
-/** 緊急停止 API(F-13 の入口。状態はコア側が保持する) */
-export async function requestHalt(halted: boolean): Promise<void> {
+/** 緊急停止 API(F-13 の入口。状態はコア側が保持する)。成功可否を返す。 */
+export async function requestHalt(halted: boolean): Promise<boolean> {
   const token = new URLSearchParams(location.search).get("token") ?? "";
-  await fetch("/api/halt", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({ halted }),
-  });
+  try {
+    const res = await fetch("/api/halt", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ halted }),
+    });
+    return res.ok;
+  } catch {
+    return false; // ネットワーク断・コア停止中
+  }
 }
