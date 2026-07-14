@@ -6,7 +6,7 @@
 from decimal import Decimal
 
 from core.config import RiskConfig
-from core.models import Position
+from core.models import Position, RestraintMode, RestraintState
 from core.risk import RiskGate
 
 CFG = RiskConfig(
@@ -110,6 +110,41 @@ class TestKillSwitch:
         gate = RiskGate(CFG, halted=True)
         gate.halted = False
         assert entry(gate) == (True, "PASS")
+
+
+class TestRestraint:
+    """取引抑制モード(F-20)のゲート強制。LLM 出力に関係なくコードで拒否する。"""
+
+    def test_no_entry_rejects(self) -> None:
+        gate = RiskGate(CFG)
+        gate.restraint = RestraintState(
+            mode=RestraintMode.NO_ENTRY, reasons=["米CPI の発表前後"]
+        )
+        allowed, code = entry(gate, notional_jpy=10_000)
+        assert (allowed, code) == (False, "RESTRAINT_NO_ENTRY")
+
+    def test_size_half_boundary(self) -> None:
+        gate = RiskGate(CFG)
+        gate.restraint = RestraintState(mode=RestraintMode.SIZE_HALF, reasons=["VIX 上昇"])
+        assert gate.effective_max_trade_notional() == 25_000
+        assert entry(gate, notional_jpy=25_000) == (True, "PASS")  # 半減後ちょうどは許可
+        assert entry(gate, notional_jpy=25_001) == (False, "RESTRAINT_SIZE")
+
+    def test_no_entry_allows_close(self) -> None:
+        gate = RiskGate(CFG)
+        gate.restraint = RestraintState(mode=RestraintMode.NO_ENTRY, reasons=["x"])
+        assert gate.check_close(has_position=True).allowed is True
+
+    def test_release_restores_full_limit(self) -> None:
+        gate = RiskGate(CFG)
+        gate.restraint = RestraintState(mode=RestraintMode.SIZE_HALF, reasons=["x"])
+        gate.restraint = RestraintState()
+        assert entry(gate, notional_jpy=50_000) == (True, "PASS")
+
+    def test_halted_takes_precedence_over_restraint(self) -> None:
+        gate = RiskGate(CFG, halted=True)
+        gate.restraint = RestraintState(mode=RestraintMode.SIZE_HALF, reasons=["x"])
+        assert entry(gate, notional_jpy=10_000) == (False, "HALTED")
 
 
 class TestCloseGate:

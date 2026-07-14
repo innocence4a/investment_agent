@@ -14,13 +14,17 @@ import argparse
 import asyncio
 import contextlib
 import logging
+from pathlib import Path
 
 from aiohttp import web
 
+from core.advisor import AdvisorAgent, AnthropicAdvisor, MockAdvisor
 from core.agent import AnthropicTraderAgent, MockTraderAgent, TraderAgent
+from core.calendar import EconomicCalendar
 from core.config import Settings
 from core.engine import Engine
 from core.feed import BitflyerFeed, PriceFeed, SimFeed
+from core.macro import MacroSource, RealMacroSource, SimMacroSource
 from core.notifier import Notifier
 from core.server import build_app
 from core.store import Store
@@ -64,7 +68,20 @@ async def run() -> None:
         MockTraderAgent() if settings.llm == "mock" else AnthropicTraderAgent(settings, store)
     )
     notifier = Notifier(settings.slack_webhook_url)
-    engine = Engine(settings, store, feed, agent, notifier)
+    # 関連指標(F-18): auto は価格フィードに追従(sim なら sim)
+    use_sim_macro = settings.macro_source == "sim" or (
+        settings.macro_source == "auto" and settings.feed == "sim"
+    )
+    macro_source: MacroSource = SimMacroSource() if use_sim_macro else RealMacroSource()
+    # 経済指標カレンダー(F-19)とリスク管理(F-20)・相談役(F-21)
+    calendar = EconomicCalendar(Path(settings.calendar_path) if settings.calendar_path else None)
+    advisor: AdvisorAgent = (
+        MockAdvisor() if settings.llm == "mock" else AnthropicAdvisor(settings, store)
+    )
+    engine = Engine(
+        settings, store, feed, agent, notifier,
+        macro_source=macro_source, calendar=calendar, advisor=advisor,
+    )
 
     app = build_app(engine, settings.auth_token)
     runner = web.AppRunner(app)
