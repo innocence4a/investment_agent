@@ -16,6 +16,7 @@
       <span class="badge paper" id="modeBadge">PAPER</span>
       <span class="badge sim" id="feedBadge" hidden>SIM データ</span>
       <span class="badge sim" id="llmBadge" hidden>モック判断</span>
+      <span class="badge restraint" id="restraintBadge" hidden></span>
       <span class="live"><span class="dot" id="liveDot"></span><span id="liveLabel">接続中…</span></span>
       <span class="spacer"></span>
       <span class="clock num" id="clock">--:--:-- JST</span>
@@ -24,6 +25,8 @@
 
     <div class="halt-banner">⏸ 緊急停止中 — 新規エントリーを停止しています(既存ポジションの損切り・利確監視は継続)。「再開する」ボタンで復帰できます。</div>
     <div class="op-error" id="opError" hidden></div>
+
+    <section class="macro" id="macroStrip" aria-label="関連指標" hidden></section>
 
     <section class="kpis" aria-label="サマリー">
       <div class="kpi"><div class="label">総資産</div><div class="value num" id="kEquity">—</div><div class="sub num" id="kEquitySub"></div></div>
@@ -79,6 +82,11 @@
       <section class="panel feed">
         <div class="panel-head"><h2>約定フィード</h2><span class="meta">ライブ</span></div>
         <ul class="feed-list" id="feedList"></ul>
+      </section>
+      <section class="panel events">
+        <div class="panel-head"><h2>経済指標カレンダー</h2><span class="meta">発表前後は取引抑制(F-19)</span></div>
+        <div id="schedList" class="sched" aria-label="経済指標カレンダー"></div>
+        <p class="note" id="schedNote" hidden>予定されているイベントはありません</p>
       </section>
     </div>
 

@@ -22,8 +22,23 @@ class RiskConfig(BaseModel):
     take_profit_pct: float = 4.0  # 利確ライン(取得単価比 %)
 
 
+class RiskAgentConfig(BaseModel):
+    """リスク管理エージェント(F-20)のルール設定。
+
+    抑制の判定はすべてルール(コード)で行い、結果はリスクゲートの状態として強制される。
+    """
+
+    vix_size_half: float = 25.0  # VIX がこの値以上 → サイズ半減
+    vix_no_entry: float = 35.0  # VIX がこの値以上 → 新規停止
+    consecutive_losses_size_half: int = 3  # 本日この連敗数以上 → サイズ半減
+    daily_loss_warn_ratio: float = 0.8  # 日次損失が上限のこの割合以上 → サイズ半減
+    check_interval_sec: float = 30.0  # 定期評価の間隔
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="IA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="IA_", env_file=".env", env_nested_delimiter="__", extra="ignore"
+    )
 
     # モード(Phase 1 は paper 固定。live は Phase 2 で発注者承認後にのみ実装)
     mode: str = "paper"
@@ -52,4 +67,16 @@ class Settings(BaseSettings):
     slack_webhook_url: str = ""
     feed_stale_sec: float = 60.0  # この秒数ティックが無ければフィード断として通知
 
+    # ── Phase 1.5 ──
+    # 関連指標(F-18): "auto"(feed=sim なら sim、それ以外は実ソース)/ "real" / "sim"
+    macro_source: str = "auto"
+    macro_poll_sec: float = 300.0  # 無料ソースは 15〜20 分遅延のため 5 分ポーリングで十分
+    macro_stale_sec: float = 1800.0  # これより古い指標は判断材料から外す
+    # 経済指標カレンダー(F-19): 空なら同梱の core/data/economic_calendar.json
+    calendar_path: str = ""
+    # 相談役(F-21): 日次レビューの実行時刻(JST)とモデル
+    advisor_hour_jst: int = 7
+    advisor_model: str = "claude-sonnet-5"
+
+    risk_agent: RiskAgentConfig = RiskAgentConfig()
     risk: RiskConfig = RiskConfig()

@@ -2,18 +2,30 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from core.advisor import MockAdvisor
 from core.agent import MockTraderAgent
+from core.calendar import EconomicCalendar
 from core.config import Settings
 from core.engine import Engine
 from core.feed import SimFeed
-from core.models import Fill, Ticker, TraderDecision, utcnow
+from core.models import (
+    EconomicEvent,
+    Fill,
+    MacroSnapshot,
+    MacroTile,
+    RestraintMode,
+    RestraintState,
+    Ticker,
+    TraderDecision,
+    utcnow,
+)
 from core.notifier import Notifier
 from core.store import Store
 
@@ -203,6 +215,118 @@ async def test_supervised_task_notifies_and_restarts(engine: Engine) -> None:
     notifier = engine.notifier
     assert isinstance(notifier, CaptureNotifier)
     assert any("テストタスク" in text and level == "error" for level, text in notifier.sent)
+
+
+class FixedCalendar(EconomicCalendar):
+    """テスト用: イベントを固定注入するカレンダー(ルール生成なし)。"""
+
+    def __init__(self, events: list[EconomicEvent]) -> None:
+        self._events = sorted(events, key=lambda e: e.ts)
+
+
+def cpi_event(ts: "datetime", importance: str = "hi") -> EconomicEvent:
+    return EconomicEvent(
+        id="cpi-test", label="米CPI(テスト)",
+        importance=importance,  # type: ignore[arg-type]
+        ts=ts, window_before_min=30, window_after_min=30,
+    )
+
+
+async def test_restraint_no_entry_blocks_buy_at_gate(engine: Engine) -> None:
+    """リスク管理の抑制状態はゲート層で強制され、トレーダー提案より優先される。"""
+    engine.market.update(tick(10_000_000))
+    engine.gate.restraint = RestraintState(
+        mode=RestraintMode.NO_ENTRY, reasons=["米CPI の発表前後の取引抑制ウィンドウ内"]
+    )
+    d = TraderDecision(action="buy", symbol="BTC_JPY", notional_jpy=10_000,
+                       confidence=90, reason="抑制中でも強気の買い提案(LLM 暴走ケース)")
+    await engine._apply_decision(d)
+    assert engine.broker.positions() == {}
+    thoughts = await engine.store.recent_thoughts(10)
+    assert any("RESTRAINT_NO_ENTRY" in (t.gate or "") for t in thoughts)
+
+
+async def test_risk_agent_activates_and_releases_on_calendar(engine: Engine) -> None:
+    """カレンダーの抑制ウィンドウで自動発動し、ウィンドウ終了で自動解除される。"""
+    engine.market.update(tick(10_000_000))
+    engine.calendar = FixedCalendar([cpi_event(utcnow())])  # いまがウィンドウ内
+    await engine._evaluate_restraint()
+    assert engine.gate.restraint.mode is RestraintMode.NO_ENTRY
+    thoughts = await engine.store.recent_thoughts(10)
+    assert any(t.agent == "リスク管理" and "米CPI" in t.text for t in thoughts)
+    assert any(m["type"] == "restraint" for m in engine.messages)  # type: ignore[attr-defined]
+    # ウィンドウ外になれば解除
+    engine.calendar = FixedCalendar([cpi_event(utcnow() + timedelta(hours=6))])
+    await engine._evaluate_restraint()
+    released: RestraintMode = engine.gate.restraint.mode
+    assert released is RestraintMode.NONE
+    thoughts = await engine.store.recent_thoughts(10)
+    assert any("解除" in t.text for t in thoughts)
+
+
+async def test_risk_agent_no_spam_when_state_unchanged(engine: Engine) -> None:
+    engine.calendar = FixedCalendar([cpi_event(utcnow())])
+    await engine._evaluate_restraint()
+    n_before = len(await engine.store.recent_thoughts(50))
+    await engine._evaluate_restraint()  # 同じ状態 → 追加の記録なし
+    assert len(await engine.store.recent_thoughts(50)) == n_before
+
+
+async def test_consecutive_losses_counts_trailing_sells(engine: Engine) -> None:
+    def sell(pnl: int) -> Fill:
+        return Fill(ts=utcnow(), symbol="BTC_JPY", side="sell", qty=Decimal("0.001"),
+                    price=10_000_000, notional=10_000, fee=0, realized_pnl=pnl)
+
+    def buy() -> Fill:
+        return Fill(ts=utcnow(), symbol="BTC_JPY", side="buy", qty=Decimal("0.001"),
+                    price=10_000_000, notional=10_000, fee=0)
+
+    for f in (sell(100), sell(-1), buy(), sell(-1), sell(-1)):
+        await engine.store.add_fill(f)
+    # 買いは連敗判定の対象外。勝ちが出るまで遡って 3 連敗
+    assert await engine._consecutive_losses_today() == 3
+
+
+async def test_advisor_records_advice_thought(engine: Engine) -> None:
+    engine.advisor = MockAdvisor()
+    engine.market.update(tick(10_000_000))
+    await engine._run_advisor()
+    thoughts = await engine.store.recent_thoughts(10)
+    advice = [t for t in thoughts if t.kind == "advice"]
+    assert len(advice) == 1
+    assert advice[0].agent == "相談役"
+    assert advice[0].text  # 日本語の所感が入っている
+    notifier = engine.notifier
+    assert isinstance(notifier, CaptureNotifier)
+    assert any("相談役" in text for _, text in notifier.sent)
+    # 相談役はポジション・現金に一切影響しない(発注経路に接続しない)
+    assert engine.broker.cash == engine.settings.start_capital_jpy
+    assert engine.broker.positions() == {}
+
+
+async def test_trader_context_includes_macro_calendar_restraint(engine: Engine) -> None:
+    engine.macro = MacroSnapshot(
+        tiles={"vix": MacroTile(key="vix", value=27.5, change_pct=3.0, ts=utcnow())},
+        fetched_at=utcnow(),
+    )
+    engine.calendar = FixedCalendar([cpi_event(utcnow() + timedelta(hours=2))])
+    engine.gate.restraint = RestraintState(mode=RestraintMode.SIZE_HALF, reasons=["VIX 上昇"])
+    extra = engine._trader_extra_context()
+    assert extra["macro_indicators"]["vix"]["value"] == 27.5
+    assert extra["upcoming_events"][0]["label"] == "米CPI(テスト)"
+    assert 110 <= extra["upcoming_events"][0]["minutes_until"] <= 120
+    assert extra["restraint"]["mode"] == "size_half"
+
+
+async def test_stale_macro_excluded_from_context(engine: Engine) -> None:
+    old = utcnow() - timedelta(seconds=engine.settings.macro_stale_sec + 60)
+    engine.macro = MacroSnapshot(
+        tiles={"vix": MacroTile(key="vix", value=50.0, change_pct=None, ts=old)},
+        fetched_at=old,
+    )
+    # 鮮度切れの VIX は判断材料からも(誤発動を防ぐため)リスク評価からも外れる
+    assert engine._fresh_vix() is None
+    assert "macro_indicators" not in engine._trader_extra_context()
 
 
 async def test_supervised_repeated_crashes_halt_new_entries(

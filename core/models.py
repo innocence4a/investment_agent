@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Literal
 
@@ -150,7 +150,7 @@ class Position(BaseModel):
         return int(((price - self.avg_cost) * self.qty).quantize(Decimal("1"), ROUND_HALF_UP))
 
 
-ThoughtKind = Literal["buy", "sell", "close", "skip", "risk", "system"]
+ThoughtKind = Literal["buy", "sell", "close", "skip", "risk", "advice", "system"]
 
 
 class Thought(BaseModel):
@@ -197,3 +197,76 @@ class EquityPoint(BaseModel):
     @field_serializer("ts")
     def _ser_ts(self, v: datetime) -> str:
         return v.isoformat()
+
+
+# ── Phase 1.5: 関連指標(F-18) ──────────────────────
+
+MacroKey = Literal["fear_greed", "vix", "gold_usd", "sp500", "dxy", "us10y"]
+MACRO_KEYS: tuple[MacroKey, ...] = ("fear_greed", "vix", "gold_usd", "sp500", "dxy", "us10y")
+
+
+class MacroTile(BaseModel):
+    """関連指標 1 件。表示・判断材料用であり金銭計算には使わない(float 可)。"""
+
+    key: MacroKey
+    value: float
+    change_pct: float | None = None  # 基準値(前回終値等)からの変化率
+    ts: datetime
+
+    @field_serializer("ts")
+    def _ser_ts(self, v: datetime) -> str:
+        return v.isoformat()
+
+
+class MacroSnapshot(BaseModel):
+    """関連指標の最新スナップショット。取得失敗した指標は含まれない。"""
+
+    tiles: dict[MacroKey, MacroTile] = {}
+    fetched_at: datetime | None = None
+
+    @field_serializer("fetched_at")
+    def _ser_fetched(self, v: datetime | None) -> str | None:
+        return v.isoformat() if v else None
+
+
+# ── Phase 1.5: 経済指標カレンダー(F-19) ────────────
+
+Importance = Literal["hi", "mid", "lo"]
+
+
+class EconomicEvent(BaseModel):
+    """経済指標・イベントの予定 1 件(時刻は UTC)。"""
+
+    id: str
+    label: str  # 例: "米雇用統計(NFP)"
+    importance: Importance
+    ts: datetime
+    window_before_min: int = 0  # 発表前の取引抑制ウィンドウ(分)
+    window_after_min: int = 0  # 発表後の取引抑制ウィンドウ(分)
+    note: str = ""
+
+    @field_serializer("ts")
+    def _ser_ts(self, v: datetime) -> str:
+        return v.isoformat()
+
+    def window_active(self, now: datetime) -> bool:
+        """now が取引抑制ウィンドウ内かどうか。境界は「ちょうど」も含む。"""
+        start = self.ts - timedelta(minutes=self.window_before_min)
+        end = self.ts + timedelta(minutes=self.window_after_min)
+        return start <= now <= end
+
+
+# ── Phase 1.5: リスク管理エージェントの抑制状態(F-20) ──
+
+
+class RestraintMode(enum.StrEnum):
+    """取引抑制モード。コードのリスクゲート層が強制する状態(LLM は直接触れない)。"""
+
+    NONE = "none"  # 通常
+    SIZE_HALF = "size_half"  # 新規エントリーのサイズを半分に制限
+    NO_ENTRY = "no_entry"  # 新規エントリー停止(決済・損切り監視は継続)
+
+
+class RestraintState(BaseModel):
+    mode: RestraintMode = RestraintMode.NONE
+    reasons: list[str] = []  # 日本語の根拠(思考ログ・画面表示用)

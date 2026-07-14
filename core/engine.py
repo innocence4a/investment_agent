@@ -19,16 +19,22 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, timedelta, timezone
 from typing import Any
 
+from core import risk_agent
+from core.advisor import AGENT_NAME as ADVISOR_NAME
+from core.advisor import AdvisorAgent
 from core.agent import AGENT_NAME, CostLimitExceeded, MockTraderAgent, TraderAgent
 from core.agent import build_market_context as build_context
 from core.broker import BrokerError, PaperBroker
+from core.calendar import EconomicCalendar
 from core.config import Settings
 from core.feed import PriceFeed
+from core.macro import MacroSource
 from core.market import MarketState
 from core.models import (
     SYMBOLS,
     Candle,
     Kpi,
+    MacroSnapshot,
     Symbol,
     Thought,
     Ticker,
@@ -57,12 +63,20 @@ class Engine:
         feed: PriceFeed,
         agent: TraderAgent,
         notifier: Notifier,
+        *,
+        macro_source: MacroSource | None = None,
+        calendar: EconomicCalendar | None = None,
+        advisor: AdvisorAgent | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.feed = feed
         self.agent = agent
         self.notifier = notifier
+        self.macro_source = macro_source
+        self.calendar = calendar
+        self.advisor = advisor
+        self.macro = MacroSnapshot()
         self.market = MarketState()
         self.broker = PaperBroker(
             settings.start_capital_jpy,
@@ -116,6 +130,12 @@ class Engine:
             ("ローソク足永続化", self._flush_loop),
             ("フィード死活監視", self._watchdog_loop),
         ]
+        if self.macro_source is not None:
+            loop_fns.append(("関連指標の取得", self._macro_loop))
+        if self.calendar is not None:
+            loop_fns.append(("リスク管理エージェント", self._risk_agent_loop))
+        if self.advisor is not None:
+            loop_fns.append(("相談役エージェント", self._advisor_loop))
         self._tasks = [
             asyncio.create_task(self._supervised(name, fn)) for name, fn in loop_fns
         ]
@@ -273,11 +293,35 @@ class Engine:
         context = build_context(
             self.market, self.broker.positions(),
             cash=self.broker.cash, daily_pnl=daily_pnl, trades_today=trades_today,
-            max_trade_notional=self.settings.risk.max_trade_notional_jpy,
+            # 抑制(サイズ半減)中は LLM に伝える上限も半分にする(ゲートは別途強制)
+            max_trade_notional=self.gate.effective_max_trade_notional(),
             exclude=stale,  # 途絶中の銘柄は判断材料から除外(古い価格で判断させない)
         )
+        context.update(self._trader_extra_context())
         decision = await self.agent.decide(context)
         await self._apply_decision(decision)
+
+    def _trader_extra_context(self) -> dict[str, Any]:
+        """関連指標(F-18)・カレンダー(F-19)・抑制状態を LLM 判断のインプットに加える。"""
+        extra: dict[str, Any] = {}
+        macro = self._fresh_macro()
+        if macro:
+            extra["macro_indicators"] = {
+                key: {"value": t.value, "change_pct": t.change_pct} for key, t in macro.items()
+            }
+        if self.calendar is not None:
+            now = utcnow()
+            extra["upcoming_events"] = [
+                {
+                    "label": e.label,
+                    "importance": e.importance,
+                    "minutes_until": int((e.ts - now).total_seconds() // 60),
+                }
+                for e in self.calendar.upcoming(now, limit=3)
+            ]
+        r = self.gate.restraint
+        extra["restraint"] = {"mode": r.mode.value, "reasons": r.reasons}
+        return extra
 
     async def _apply_decision(self, d: TraderDecision) -> None:
         async with self._trade_lock:
@@ -480,6 +524,145 @@ class Engine:
                 await self.notifier.send(f"{sym} の価格フィードが回復しました。")
             notified = stale
 
+    # ── 関連指標(F-18) ─────────────────────────────
+    async def _macro_loop(self) -> None:
+        assert self.macro_source is not None
+        while True:
+            snap = await self.macro_source.fetch()
+            if snap.tiles:  # 全滅時は古いスナップショットを保持(鮮度は表示側で判断)
+                self.macro = snap
+                await self.broadcast("macro", snap.model_dump())
+            await asyncio.sleep(self.settings.macro_poll_sec)
+
+    def _fresh_macro(self) -> dict[str, Any]:
+        """鮮度切れしていない関連指標のみを返す(古い値で判断させない)。"""
+        now = utcnow()
+        return {
+            key: t
+            for key, t in self.macro.tiles.items()
+            if (now - t.ts).total_seconds() <= self.settings.macro_stale_sec
+        }
+
+    def _fresh_vix(self) -> float | None:
+        tile = self._fresh_macro().get("vix")
+        return float(tile.value) if tile is not None else None
+
+    # ── リスク管理エージェント(F-20) ────────────────
+    async def _consecutive_losses_today(self) -> int:
+        fills = await self.store.fills_since(self._jst_midnight_utc_iso())
+        streak = 0
+        for f in reversed(fills):
+            if f.realized_pnl is None:
+                continue  # 買い約定は連敗の判定対象外
+            if f.realized_pnl < 0:
+                streak += 1
+            else:
+                break
+        return streak
+
+    async def _risk_agent_loop(self) -> None:
+        assert self.calendar is not None
+        while True:
+            await self._evaluate_restraint()
+            await asyncio.sleep(self.settings.risk_agent.check_interval_sec)
+
+    async def _evaluate_restraint(self) -> None:
+        """ルール評価の結果をリスクゲートの状態に反映する(変化時のみ記録・通知)。"""
+        assert self.calendar is not None
+        daily_pnl, _ = await self._daily_stats()
+        inputs = risk_agent.RiskInputs(
+            daily_realized_pnl_jpy=daily_pnl,
+            consecutive_losses_today=await self._consecutive_losses_today(),
+            vix=self._fresh_vix(),
+            active_events=self.calendar.active_events(),
+        )
+        new = risk_agent.evaluate(inputs, self.settings.risk, self.settings.risk_agent)
+        old = self.gate.restraint
+        if new == old:
+            return
+        self.gate.restraint = new
+        text = risk_agent.transition_text(old, new)
+        await self._add_thought(
+            Thought(
+                ts=utcnow(), agent=risk_agent.AGENT_NAME, kind="risk", text=text,
+                gate=f"抑制({risk_agent.MODE_LABEL[new.mode]})",
+            )
+        )
+        await self.broadcast("restraint", new.model_dump())
+        await self.notifier.send(
+            f"リスク管理: {text}", level="warn" if new.reasons else "info"
+        )
+
+    # ── 相談役エージェント(F-21) ────────────────────
+    async def _advisor_loop(self) -> None:
+        assert self.advisor is not None
+        # 起動時: 直近 20 時間以内にレビューが無ければ 1 回実行(再起動での取りこぼし防止)
+        await asyncio.sleep(15)
+        last = await self.store.last_thought_ts("advice")
+        if last is None or (utcnow() - last).total_seconds() > 20 * 3600:
+            await self._run_advisor()
+        while True:
+            await asyncio.sleep(self._seconds_until_advisor_hour())
+            await self._run_advisor()
+
+    def _seconds_until_advisor_hour(self) -> float:
+        """次の実行時刻(JST の advisor_hour_jst 時)までの秒数。"""
+        now = utcnow().astimezone(JST)
+        target = now.replace(
+            hour=self.settings.advisor_hour_jst, minute=0, second=0, microsecond=0
+        )
+        if target <= now:
+            target += timedelta(days=1)
+        return max((target - now).total_seconds(), 60.0)
+
+    async def _run_advisor(self) -> None:
+        """日次レビューを実行し、思考ログと Slack(モーニングレポート)に出力する。
+
+        相談役は助言のみ(発注経路に接続しない)。失敗しても取引系タスクに影響しない。
+        """
+        assert self.advisor is not None
+        kpi = await self.kpi()
+        now = utcnow()
+        recent_thoughts = await self.store.recent_thoughts(30)
+        context: dict[str, Any] = {
+            "kpi": {
+                "equity": kpi.equity, "pnl_total": kpi.pnl_total,
+                "pnl_today": kpi.pnl_today, "wins": kpi.wins, "losses": kpi.losses,
+                "trades": kpi.trades,
+            },
+            "macro": {
+                key: {"value": t.value, "change_pct": t.change_pct}
+                for key, t in self._fresh_macro().items()
+            },
+            "upcoming_events": [
+                {
+                    "label": e.label,
+                    "importance": e.importance,
+                    "minutes_until": int((e.ts - now).total_seconds() // 60),
+                }
+                for e in (self.calendar.upcoming(now, limit=5) if self.calendar else [])
+            ],
+            "restraint": {
+                "mode": self.gate.restraint.mode.value,
+                "reasons": self.gate.restraint.reasons,
+            },
+            "recent_decisions": [
+                {"kind": t.kind, "agent": t.agent, "text": t.text[:120]}
+                for t in recent_thoughts
+                if t.kind in ("buy", "sell", "skip", "risk")
+            ][-15:],
+        }
+        try:
+            text = await self.advisor.review(context)
+        except Exception as e:
+            logger.warning("相談役レビューに失敗: %s", e)
+            await self.notifier.send(f"相談役レビューに失敗しました: {e}", level="warn")
+            return
+        await self._add_thought(
+            Thought(ts=utcnow(), agent=ADVISOR_NAME, kind="advice", text=text)
+        )
+        await self.notifier.send(f"相談役の日次レビュー:\n{text}")
+
     # ── ダッシュボード初期スナップショット ──────────
     async def snapshot(self) -> dict[str, Any]:
         kpi = await self.kpi()
@@ -505,4 +688,10 @@ class Engine:
             "thoughts": [t.model_dump() for t in await self.store.recent_thoughts(50)],
             "fills": [f.model_dump() for f in await self.store.recent_fills(30)],
             "positions": [p.model_dump() for p in self.broker.positions().values()],
+            "macro": self.macro.model_dump(),
+            "calendar": [
+                e.model_dump()
+                for e in (self.calendar.upcoming(limit=6) if self.calendar else [])
+            ],
+            "restraint": self.gate.restraint.model_dump(),
         }

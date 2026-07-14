@@ -115,6 +115,14 @@ class Store:
             for r in rows
         ][::-1]
 
+    async def last_thought_ts(self, kind: str) -> datetime | None:
+        """指定 kind の最新の思考ログ時刻(相談役の日次実行判定などに使う)。"""
+        cur = await self.db.execute(
+            "SELECT ts FROM thoughts WHERE kind = ? ORDER BY id DESC LIMIT 1", (kind,)
+        )
+        row = await cur.fetchone()
+        return datetime.fromisoformat(row["ts"]) if row else None
+
     # ── 約定 ──
     async def add_fill(self, f: Fill) -> Fill:
         async with self._write_lock:
