@@ -21,6 +21,7 @@ const KIND_META: Record<ThoughtKind, { label: string; chip: string }> = {
   close: { label: "売り", chip: "sell" },
   skip: { label: "見送り", chip: "skip" },
   risk: { label: "抑制", chip: "risk" },
+  advice: { label: "所感", chip: "advice" },
   system: { label: "システム", chip: "skip" },
 };
 
@@ -36,7 +37,7 @@ function thoughtHtml(t: Thought): string {
   const meta = (KIND_META as Record<string, { label: string; chip: string }>)[t.kind]
     ?? KIND_META.system;
   const footer =
-    t.kind === "system"
+    t.kind === "system" || t.kind === "advice"
       ? ""
       : `<div class="conf">${
           t.confidence !== null ? `確信度 <b class="num">${Number(t.confidence)}%</b> · ` : ""
@@ -130,6 +131,98 @@ function renderKpi(): void {
   const n = k.wins + k.losses;
   $("kWin").textContent = n ? ((k.wins / n) * 100).toFixed(1) + "%" : "—";
   $("kTrades").textContent = `取引 ${k.trades} 回`;
+}
+
+// ── 関連指標(F-18)────────────────────────────────
+const MACRO_META: Record<
+  string,
+  { label: string; fmt: (v: number) => string; sub?: (v: number) => string }
+> = {
+  fear_greed: {
+    label: "FEAR & GREED",
+    fmt: (v) => String(Math.round(v)),
+    sub: (v) =>
+      v >= 75 ? "極端な強欲" : v >= 55 ? "強欲" : v >= 45 ? "中立" : v >= 25 ? "恐怖" : "極端な恐怖",
+  },
+  vix: { label: "恐怖指数 VIX", fmt: (v) => v.toFixed(1) },
+  gold_usd: { label: "ゴールド USD/oz", fmt: (v) => Math.round(v).toLocaleString("en-US") },
+  sp500: { label: "S&P500 先物", fmt: (v) => Math.round(v).toLocaleString("en-US") },
+  dxy: { label: "ドル指数 DXY", fmt: (v) => v.toFixed(1) },
+  us10y: { label: "米10年金利", fmt: (v) => v.toFixed(2) + "%" },
+};
+const MACRO_ORDER = ["fear_greed", "vix", "gold_usd", "sp500", "dxy", "us10y"] as const;
+
+function renderMacro(): void {
+  const strip = $("macroStrip");
+  const tiles = state.macro.tiles;
+  const cells = MACRO_ORDER.filter((k) => tiles[k]).map((k) => {
+    const t = tiles[k]!;
+    const meta = MACRO_META[k]!;
+    let sub = "";
+    let subCls = "";
+    if (meta.sub) {
+      sub = meta.sub(t.value);
+    } else if (t.change_pct !== null) {
+      sub = `${t.change_pct >= 0 ? "▲" : "▼"} ${Math.abs(t.change_pct).toFixed(2)}%`;
+      subCls = t.change_pct >= 0 ? "pos" : "neg";
+    }
+    return `<div class="mtile"><div class="label">${meta.label}</div>
+      <div class="value">${meta.fmt(t.value)}</div>
+      <div class="sub ${subCls}">${esc(sub)}</div></div>`;
+  });
+  strip.hidden = cells.length === 0;
+  strip.innerHTML = cells.join("");
+}
+
+// ── 経済指標カレンダー(F-19)──────────────────────
+function countdown(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h >= 48) return `${Math.floor(h / 24)} 日`;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function renderCalendar(): void {
+  const list = $("schedList");
+  const note = $("schedNote");
+  const now = Date.now();
+  const rows = state.calendar.map((e) => {
+    const at = Date.parse(e.ts);
+    const dt = new Date(at);
+    const dateStr = dt.toLocaleString("ja-JP", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+      hour12: false, timeZone: "Asia/Tokyo",
+    });
+    const impLabel = e.importance === "hi" ? "高" : e.importance === "mid" ? "中" : "低";
+    const winActive =
+      now >= at - e.window_before_min * 60_000 && now <= at + e.window_after_min * 60_000;
+    const win =
+      e.window_before_min || e.window_after_min
+        ? `<span class="swin${winActive ? " active" : ""}">${
+            winActive ? "抑制中" : `前後${Math.max(e.window_before_min, e.window_after_min)}分 抑制`
+          }</span>`
+        : "";
+    const t = at > now ? `${dateStr} · あと ${countdown(at - now)}` : dateStr;
+    return `<div class="sched-row"><span class="imp ${e.importance}">${impLabel}</span>
+      <span class="sname">${esc(e.label)}</span>${win}
+      <span class="t num">${t}</span></div>`;
+  });
+  note.hidden = rows.length > 0;
+  list.innerHTML = rows.join("");
+}
+
+// ── 取引抑制状態(F-20)────────────────────────────
+function renderRestraint(): void {
+  const badge = $("restraintBadge");
+  const r = state.restraint;
+  if (r.mode === "none") {
+    badge.hidden = true;
+    return;
+  }
+  badge.hidden = false;
+  badge.textContent = r.mode === "no_entry" ? "抑制: 新規停止" : "抑制: サイズ半減";
+  badge.title = r.reasons.join(" / ");
 }
 
 // ── トップバー・接続状態 ───────────────────────────
@@ -244,6 +337,9 @@ function scheduleRender(chartsChanged: boolean, domChanged: boolean): void {
       renderFills();
       renderPositions();
       renderTopbar();
+      renderMacro();
+      renderCalendar();
+      renderRestraint();
       dirtyDom = false;
     }
   });
@@ -278,8 +374,9 @@ renderTopbar();
 charts.drawAll();
 window.addEventListener("resize", () => charts.drawAll());
 
-// 時計・稼働時間(表示は JST)
+// 時計・稼働時間(表示は JST)・カレンダーのカウントダウン
 setInterval(() => {
   $("clock").textContent = nowJst() + " JST";
   if (state.kpi) $("kUptime").textContent = uptimeLabel(state.kpi.started_at);
+  renderCalendar();
 }, 1000);

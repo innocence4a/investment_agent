@@ -25,6 +25,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--sans);margin:0;
 .badge.paper{color:var(--gold);border:1px solid color-mix(in srgb,var(--gold) 55%,transparent);background:rgba(187,138,38,.12)}
 .badge.live-mode{color:var(--down-text);border:1px solid rgba(224,85,96,.55);background:rgba(224,85,96,.12)}
 .badge.sim{color:var(--accent);border:1px solid rgba(92,142,232,.5);background:var(--accent-soft)}
+.badge.restraint{color:#d7a94e;border:1px solid rgba(187,138,38,.55);background:rgba(187,138,38,.13)}
 .live{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink2)}
 .live .dot{width:8px;height:8px;border-radius:50%;background:var(--up-text);box-shadow:0 0 0 0 rgba(67,207,151,.5);animation:pulse 2s infinite}
 @keyframes pulse{70%{box-shadow:0 0 0 9px rgba(67,207,151,0)}100%{box-shadow:0 0 0 0 rgba(67,207,151,0)}}
@@ -42,6 +43,13 @@ body.halted .halt-banner{display:block}
           background:rgba(224,85,96,.2);border:1px solid var(--down);color:var(--down-text)}
 body.halted .live .dot{background:var(--down-text);animation:none}
 body.disconnected .live .dot{background:var(--muted);animation:none}
+
+/* ── 関連指標(F-18)──────────────────── */
+.macro{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+.mtile{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 14px;min-width:0}
+.mtile .label{font-size:10.5px;letter-spacing:.07em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mtile .value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:15px;font-weight:700;margin-top:2px}
+.mtile .sub{font-size:11px;margin-top:1px;font-family:var(--mono);font-variant-numeric:tabular-nums}
 
 /* ── KPI row ────────────────────────── */
 .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
@@ -84,14 +92,15 @@ canvas{display:block;width:100%}
 .chip.sell{color:var(--down-text);background:rgba(224,85,96,.14);border:1px solid rgba(224,85,96,.5)}
 .chip.skip{color:var(--ink2);background:rgba(147,161,181,.1);border:1px solid var(--line)}
 .chip.risk{color:#d7a94e;background:rgba(187,138,38,.13);border:1px solid rgba(187,138,38,.5)}
+.chip.advice{color:#9b87e8;background:rgba(155,135,232,.12);border:1px solid rgba(155,135,232,.45)}
 .thought .agent{font-size:10.5px;color:var(--muted);letter-spacing:.04em}
 .thought .t{margin-left:auto;font-size:11px;color:var(--muted)}
 .thought p{margin:0;font-size:12.5px;color:var(--ink2)}
 .thought .conf{font-size:11px;color:var(--muted);margin-top:6px}
 .thought .conf b{color:var(--ink)}
 
-/* ── bottom: positions + feed ───────── */
-.bottom{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:14px}
+/* ── bottom: positions + feed + calendar ── */
+.bottom{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,4fr) minmax(0,5fr);gap:14px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{font-size:11px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;font-weight:600;
    text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
@@ -107,8 +116,22 @@ tr:last-child td{border-bottom:none}
 .fill .amt{margin-left:auto}
 .note{color:var(--muted);font-size:12px;text-align:center}
 
+/* ── 経済指標カレンダー(F-19)─────────── */
+.events{max-height:280px}
+.imp{font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:1px 7px;border-radius:999px}
+.imp.hi{color:var(--down-text);background:rgba(224,85,96,.13);border:1px solid rgba(224,85,96,.45)}
+.imp.mid{color:#d7a94e;background:rgba(187,138,38,.13);border:1px solid rgba(187,138,38,.5)}
+.imp.lo{color:var(--ink2);background:rgba(147,161,181,.08);border:1px solid var(--line)}
+.sched{overflow-y:auto;flex:1}
+.sched-row{display:flex;align-items:center;gap:8px;padding:5px 2px;font-size:12px}
+.sched-row .sname{color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sched-row .swin{font-size:10px;color:#d7a94e;border:1px solid rgba(187,138,38,.5);border-radius:999px;padding:0 6px;white-space:nowrap}
+.sched-row .swin.active{color:var(--down-text);border-color:rgba(224,85,96,.5);background:rgba(224,85,96,.1)}
+.sched-row .t{margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap}
+
 @media (max-width:960px){
   .kpis{grid-template-columns:repeat(2,1fr)}
+  .macro{grid-template-columns:repeat(3,1fr)}
   .grid,.bottom{grid-template-columns:1fr}
   .thoughts{max-height:420px}
 }
