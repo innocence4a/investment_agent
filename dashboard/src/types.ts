@@ -22,7 +22,7 @@ export interface Candle {
   c: number;
 }
 
-export type ThoughtKind = "buy" | "sell" | "close" | "skip" | "risk" | "system";
+export type ThoughtKind = "buy" | "sell" | "close" | "skip" | "risk" | "advice" | "system";
 
 export interface Thought {
   id: number;
@@ -80,6 +80,41 @@ export interface Config {
   symbols: Symbol_[];
 }
 
+// ── Phase 1.5 ──────────────────────────────────────
+
+export type MacroKey = "fear_greed" | "vix" | "gold_usd" | "sp500" | "dxy" | "us10y";
+
+export interface MacroTile {
+  key: MacroKey;
+  value: number;
+  change_pct: number | null;
+  ts: string;
+}
+
+export interface MacroSnapshot {
+  tiles: Partial<Record<MacroKey, MacroTile>>;
+  fetched_at: string | null;
+}
+
+export type Importance = "hi" | "mid" | "lo";
+
+export interface EconomicEvent {
+  id: string;
+  label: string;
+  importance: Importance;
+  ts: string; // UTC ISO8601
+  window_before_min: number;
+  window_after_min: number;
+  note: string;
+}
+
+export type RestraintMode = "none" | "size_half" | "no_entry";
+
+export interface RestraintState {
+  mode: RestraintMode;
+  reasons: string[];
+}
+
 export interface Snapshot {
   config: Config;
   kpi: Kpi;
@@ -90,6 +125,9 @@ export interface Snapshot {
   thoughts: Thought[];
   fills: Fill[];
   positions: Position[];
+  macro: MacroSnapshot;
+  calendar: EconomicEvent[];
+  restraint: RestraintState;
 }
 
 export type ServerMessage =
@@ -100,4 +138,6 @@ export type ServerMessage =
   | { type: "positions"; data: Position[] }
   | { type: "kpi"; data: Kpi }
   | { type: "equity"; data: EquityPoint }
-  | { type: "halt"; data: { halted: boolean } };
+  | { type: "halt"; data: { halted: boolean } }
+  | { type: "macro"; data: MacroSnapshot }
+  | { type: "restraint"; data: RestraintState };

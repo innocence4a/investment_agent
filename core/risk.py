@@ -13,7 +13,7 @@ from __future__ import annotations
 from decimal import ROUND_HALF_UP, Decimal
 
 from core.config import RiskConfig
-from core.models import GateResult, Position
+from core.models import GateResult, Position, RestraintMode, RestraintState
 
 
 def _yen(v: int) -> str:
@@ -21,11 +21,23 @@ def _yen(v: int) -> str:
 
 
 class RiskGate:
-    """発注前チェックと損切り/利確の常時監視。緊急停止状態の保持者。"""
+    """発注前チェックと損切り/利確の常時監視。緊急停止状態・取引抑制状態の保持者。
+
+    取引抑制(F-20)はリスク管理エージェントの評価結果を「この層の状態」として保持し、
+    コードで強制する。LLM の出力が発注可否を直接決めることはない(権限の序列)。
+    """
 
     def __init__(self, config: RiskConfig, *, halted: bool = False) -> None:
         self.config = config
         self.halted = halted
+        self.restraint = RestraintState()
+
+    def effective_max_trade_notional(self) -> int:
+        """抑制状態を織り込んだ 1 取引上限。SIZE_HALF 中は半分。"""
+        base = self.config.max_trade_notional_jpy
+        if self.restraint.mode is RestraintMode.SIZE_HALF:
+            return base // 2
+        return base
 
     # ── 新規エントリー ────────────────────────────────
     def check_entry(
@@ -44,6 +56,12 @@ class RiskGate:
                 allowed=False, code="HALTED",
                 reason="緊急停止中のため新規エントリーを拒否しました(決済監視は継続)。",
             )
+        if self.restraint.mode is RestraintMode.NO_ENTRY:
+            return GateResult(
+                allowed=False, code="RESTRAINT_NO_ENTRY",
+                reason="取引抑制モード(新規停止)中のため新規エントリーを拒否しました: "
+                + " / ".join(self.restraint.reasons),
+            )
         if notional_jpy <= 0:
             return GateResult(allowed=False, code="INVALID", reason="発注額が不正です。")
         if notional_jpy > c.max_trade_notional_jpy:
@@ -51,6 +69,14 @@ class RiskGate:
                 allowed=False, code="PER_TRADE_LIMIT",
                 reason=f"1取引上限({_yen(c.max_trade_notional_jpy)})を超える発注"
                 f"({_yen(notional_jpy)})を拒否しました。",
+            )
+        if notional_jpy > self.effective_max_trade_notional():
+            return GateResult(
+                allowed=False, code="RESTRAINT_SIZE",
+                reason=f"取引抑制モード(サイズ半減)中の上限"
+                f"({_yen(self.effective_max_trade_notional())})を超える発注"
+                f"({_yen(notional_jpy)})を拒否しました: "
+                + " / ".join(self.restraint.reasons),
             )
         if daily_realized_pnl_jpy <= -c.max_daily_loss_jpy:
             return GateResult(

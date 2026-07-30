@@ -1,6 +1,6 @@
 import type {
-  Candle, Config, EquityPoint, Fill, Kpi, Position, ServerMessage, Snapshot, Symbol_, Thought,
-  Timeframe,
+  Candle, Config, EconomicEvent, EquityPoint, Fill, Kpi, MacroSnapshot, Position,
+  RestraintState, ServerMessage, Snapshot, Symbol_, Thought, Timeframe,
 } from "./types";
 
 const MAX_CANDLES = 500;
@@ -19,6 +19,9 @@ export class AppState {
   thoughts: Thought[] = []; // 新しい順
   fills: Fill[] = []; // 新しい順
   positions: Position[] = [];
+  macro: MacroSnapshot = { tiles: {}, fetched_at: null };
+  calendar: EconomicEvent[] = [];
+  restraint: RestraintState = { mode: "none", reasons: [] };
   activeSym: Symbol_ = "BTC_JPY";
   activeTf: Timeframe = "5m";
 
@@ -41,6 +44,9 @@ export class AppState {
     this.thoughts = [...s.thoughts].reverse();
     this.fills = [...s.fills].reverse();
     this.positions = s.positions;
+    this.macro = s.macro ?? { tiles: {}, fetched_at: null };
+    this.calendar = s.calendar ?? [];
+    this.restraint = s.restraint ?? { mode: "none", reasons: [] };
   }
 
   mergeCandle(c: Candle): void {
@@ -86,6 +92,12 @@ export class AppState {
         break;
       case "halt":
         this.halted = msg.data.halted;
+        break;
+      case "macro":
+        this.macro = msg.data;
+        break;
+      case "restraint":
+        this.restraint = msg.data;
         break;
     }
   }

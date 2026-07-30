@@ -3,7 +3,7 @@ import { Charts } from "./charts";
 import { jstTime, nowJst, signedPct, signedYen, uptimeLabel, yen } from "./format";
 import { AppState } from "./state";
 import { TIMEFRAMES } from "./types";
-import type { Fill, Symbol_, Thought, ThoughtKind } from "./types";
+import type { Fill, Importance, Symbol_, Thought, ThoughtKind } from "./types";
 import { connect, requestHalt } from "./ws";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T =>
@@ -21,6 +21,7 @@ const KIND_META: Record<ThoughtKind, { label: string; chip: string }> = {
   close: { label: "売り", chip: "sell" },
   skip: { label: "見送り", chip: "skip" },
   risk: { label: "抑制", chip: "risk" },
+  advice: { label: "所感", chip: "advice" },
   system: { label: "システム", chip: "skip" },
 };
 
@@ -36,7 +37,7 @@ function thoughtHtml(t: Thought): string {
   const meta = (KIND_META as Record<string, { label: string; chip: string }>)[t.kind]
     ?? KIND_META.system;
   const footer =
-    t.kind === "system"
+    t.kind === "system" || t.kind === "advice"
       ? ""
       : `<div class="conf">${
           t.confidence !== null ? `確信度 <b class="num">${Number(t.confidence)}%</b> · ` : ""
@@ -130,6 +131,130 @@ function renderKpi(): void {
   const n = k.wins + k.losses;
   $("kWin").textContent = n ? ((k.wins / n) * 100).toFixed(1) + "%" : "—";
   $("kTrades").textContent = `取引 ${k.trades} 回`;
+}
+
+// ── 関連指標(F-18)────────────────────────────────
+const MACRO_META: Record<
+  string,
+  { label: string; fmt: (v: number) => string; sub?: (v: number) => string }
+> = {
+  fear_greed: {
+    label: "FEAR & GREED",
+    fmt: (v) => String(Math.round(v)),
+    sub: (v) =>
+      v >= 75 ? "極端な強欲" : v >= 55 ? "強欲" : v >= 45 ? "中立" : v >= 25 ? "恐怖" : "極端な恐怖",
+  },
+  vix: { label: "恐怖指数 VIX", fmt: (v) => v.toFixed(1) },
+  gold_usd: { label: "ゴールド USD/oz", fmt: (v) => Math.round(v).toLocaleString("en-US") },
+  sp500: { label: "S&P500 先物", fmt: (v) => Math.round(v).toLocaleString("en-US") },
+  dxy: { label: "ドル指数 DXY", fmt: (v) => v.toFixed(1) },
+  us10y: { label: "米10年金利", fmt: (v) => v.toFixed(2) + "%" },
+};
+const MACRO_ORDER = ["fear_greed", "vix", "gold_usd", "sp500", "dxy", "us10y"] as const;
+
+function renderMacro(): void {
+  const strip = $("macroStrip");
+  const tiles = state.macro.tiles;
+  // 値は必ず有限数のみ描画する(NaN/null が 1 件混ざっても描画フレームを止めない)
+  const cells = MACRO_ORDER.filter(
+    (k) => tiles[k] && Number.isFinite(tiles[k]!.value),
+  ).map((k) => {
+    const t = tiles[k]!;
+    const meta = MACRO_META[k]!;
+    let sub = "";
+    let subCls = "";
+    if (meta.sub) {
+      sub = meta.sub(t.value);
+    } else if (t.change_pct !== null && Number.isFinite(t.change_pct)) {
+      sub = `${t.change_pct >= 0 ? "▲" : "▼"} ${Math.abs(t.change_pct).toFixed(2)}%`;
+      subCls = t.change_pct >= 0 ? "pos" : "neg";
+    }
+    return `<div class="mtile"><div class="label">${meta.label}</div>
+      <div class="value">${meta.fmt(t.value)}</div>
+      <div class="sub ${subCls}">${esc(sub)}</div></div>`;
+  });
+  strip.hidden = cells.length === 0;
+  strip.innerHTML = cells.join("");
+}
+
+// ── 経済指標カレンダー(F-19)──────────────────────
+function countdown(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h >= 48) return `${Math.floor(h / 24)} 日`;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// importance はサーバ由来の文字列 → ルックアップで信頼できるキーに変換してから
+// class・ラベルの両方に使う(未知値は lo 扱い。生値を HTML に入れない)
+const IMP_META: Record<Importance, { cls: string; label: string }> = {
+  hi: { cls: "hi", label: "高" },
+  mid: { cls: "mid", label: "中" },
+  lo: { cls: "lo", label: "低" },
+};
+
+let calendarStructureKey = "";
+
+function renderCalendar(): void {
+  const list = $("schedList");
+  const note = $("schedNote");
+  const now = Date.now();
+  // 行の構造(イベント集合)が変わった時だけ innerHTML を再構築し、
+  // 毎秒のカウントダウンはテキスト差し替えのみにする(スクロール位置を保つ)
+  const key = state.calendar.map((e) => e.id).join("|");
+  if (key !== calendarStructureKey) {
+    calendarStructureKey = key;
+    list.innerHTML = state.calendar
+      .map((e, i) => {
+        const imp = IMP_META[e.importance] ?? IMP_META.lo;
+        return `<div class="sched-row" data-i="${i}"><span class="imp ${imp.cls}">${imp.label}</span>
+          <span class="sname">${esc(e.label)}</span><span class="swin" hidden></span>
+          <span class="t num"></span></div>`;
+      })
+      .join("");
+    note.hidden = state.calendar.length > 0;
+  }
+  state.calendar.forEach((e, i) => {
+    const row = list.querySelector<HTMLElement>(`.sched-row[data-i="${i}"]`);
+    if (!row) return;
+    const at = Date.parse(e.ts);
+    if (!Number.isFinite(at)) return;
+    const dateStr = new Date(at).toLocaleString("ja-JP", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+      hour12: false, timeZone: "Asia/Tokyo",
+    });
+    const winActive =
+      now >= at - e.window_before_min * 60_000 && now <= at + e.window_after_min * 60_000;
+    const swin = row.querySelector<HTMLElement>(".swin")!;
+    if (e.window_before_min || e.window_after_min) {
+      swin.hidden = false;
+      swin.textContent = winActive
+        ? "抑制中"
+        : `前後${Math.max(e.window_before_min, e.window_after_min)}分 抑制`;
+      swin.classList.toggle("active", winActive);
+    } else {
+      swin.hidden = true;
+    }
+    row.querySelector<HTMLElement>(".t")!.textContent =
+      at > now ? `${dateStr} · あと ${countdown(at - now)}` : dateStr;
+  });
+}
+
+// ── 取引抑制状態(F-20)────────────────────────────
+function renderRestraint(): void {
+  const badge = $("restraintBadge");
+  const r = state.restraint;
+  if (r.mode === "none") {
+    badge.hidden = true;
+    return;
+  }
+  // 未知モードは安全側の汎用表示にフォールバック(誤って「サイズ半減」と表示しない)
+  const label =
+    r.mode === "no_entry" ? "抑制: 新規停止" : r.mode === "size_half" ? "抑制: サイズ半減" : "抑制中";
+  badge.hidden = false;
+  badge.textContent = label;
+  badge.title = r.reasons.join(" / ");
 }
 
 // ── トップバー・接続状態 ───────────────────────────
@@ -244,6 +369,9 @@ function scheduleRender(chartsChanged: boolean, domChanged: boolean): void {
       renderFills();
       renderPositions();
       renderTopbar();
+      renderMacro();
+      renderCalendar();
+      renderRestraint();
       dirtyDom = false;
     }
   });
@@ -278,8 +406,9 @@ renderTopbar();
 charts.drawAll();
 window.addEventListener("resize", () => charts.drawAll());
 
-// 時計・稼働時間(表示は JST)
+// 時計・稼働時間(表示は JST)・カレンダーのカウントダウン
 setInterval(() => {
   $("clock").textContent = nowJst() + " JST";
   if (state.kpi) $("kUptime").textContent = uptimeLabel(state.kpi.started_at);
+  renderCalendar();
 }, 1000);
