@@ -66,6 +66,18 @@ async def test_anthropic_advisor_records_cost_and_log(store: Store) -> None:
     assert month_cost > 0
 
 
+def test_advisor_hour_validation() -> None:
+    # 不正な時刻設定は起動時に弾く(advisor ループの連続クラッシュ → 緊急停止連鎖の防止)
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError):
+        Settings(advisor_hour_jst=24)
+    with _pytest.raises(ValidationError):
+        Settings(advisor_hour_jst=-1)
+    assert Settings(advisor_hour_jst=0).advisor_hour_jst == 0
+
+
 async def test_anthropic_advisor_respects_cost_limit(store: Store) -> None:
     advisor = AnthropicAdvisor(Settings(llm_monthly_cost_limit_usd=0.001), store)
     await store.set_state(advisor._month_key(), "1.0")  # 既に上限超過

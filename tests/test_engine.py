@@ -222,6 +222,10 @@ class FixedCalendar(EconomicCalendar):
 
     def __init__(self, events: list[EconomicEvent]) -> None:
         self._events = sorted(events, key=lambda e: e.ts)
+        self.static_missing = False
+
+    def refresh(self, *, now: datetime | None = None) -> None:
+        pass  # 固定イベントを維持
 
 
 def cpi_event(ts: "datetime", importance: str = "hi") -> EconomicEvent:
@@ -327,6 +331,119 @@ async def test_stale_macro_excluded_from_context(engine: Engine) -> None:
     # 鮮度切れの VIX は判断材料からも(誤発動を防ぐため)リスク評価からも外れる
     assert engine._fresh_vix() is None
     assert "macro_indicators" not in engine._trader_extra_context()
+
+
+async def test_restraint_reevaluated_at_order_time(engine: Engine) -> None:
+    """LLM 応答待ち中にウィンドウ入りしても、発注直前の再評価でゲートが拒否する。"""
+    engine.market.update(tick(10_000_000))
+    engine.calendar = FixedCalendar([cpi_event(utcnow())])  # 既にウィンドウ内
+    assert engine.gate.restraint.mode is RestraintMode.NONE  # 定期評価はまだ来ていない想定
+    d = TraderDecision(action="buy", symbol="BTC_JPY", notional_jpy=10_000,
+                       confidence=80, reason="ウィンドウ入り前の古いスナップショットでの提案")
+    await engine._apply_decision(d)
+    assert engine.broker.positions() == {}
+    after: RestraintMode = engine.gate.restraint.mode
+    assert after is RestraintMode.NO_ENTRY
+    thoughts = await engine.store.recent_thoughts(10)
+    assert any("RESTRAINT_NO_ENTRY" in (t.gate or "") for t in thoughts)
+
+
+async def test_macro_partial_failure_keeps_fresh_old_values(engine: Engine) -> None:
+    """VIX だけ取得失敗しても、鮮度内の旧 VIX を保持する(フェイルオープン防止)。"""
+    engine.macro = MacroSnapshot(
+        tiles={"vix": MacroTile(key="vix", value=30.0, change_pct=None, ts=utcnow())},
+        fetched_at=utcnow(),
+    )
+
+    class PartialSource:
+        async def fetch(self) -> MacroSnapshot:
+            return MacroSnapshot(
+                tiles={"gold_usd": MacroTile(key="gold_usd", value=3300.0,
+                                             change_pct=None, ts=utcnow())},
+                fetched_at=utcnow(),
+            )
+
+    engine.macro_source = PartialSource()
+    await engine._macro_once()
+    assert engine._fresh_vix() == 30.0  # 旧 VIX が残る → VIX 由来の抑制は解除されない
+    assert "gold_usd" in engine.macro.tiles
+
+
+async def test_macro_fetch_exception_does_not_propagate(engine: Engine) -> None:
+    """取得の失敗は握りつぶして継続(監督機構の連続障害→緊急停止に連鎖させない)。"""
+
+    class BrokenSource:
+        async def fetch(self) -> MacroSnapshot:
+            raise RuntimeError("network down")
+
+    engine.macro_source = BrokenSource()
+    await engine._macro_once()  # 例外が伝播しないこと
+    assert engine.macro.tiles == {}
+
+
+async def test_engine_start_restores_state_and_evaluates_restraint(tmp_path: Path) -> None:
+    """Engine.start() の実経路: 緊急停止・ブローカー復元、起動時の抑制評価、ループ登録。"""
+    from core.models import Position
+
+    settings = Settings(db_path=str(tmp_path / "s.db"), slippage_bps=0, fee_bps=0)
+    store = Store(settings.db_path)
+    await store.open()
+    await store.set_state("halted", "1")
+    await store.save_broker(
+        777_000,
+        {"BTC_JPY": Position(symbol="BTC_JPY", qty=Decimal("0.01"),
+                             avg_cost=Decimal(10_000_000))},
+    )
+    from core.advisor import MockAdvisor as _MockAdvisor
+    from core.macro import SimMacroSource
+
+    eng = Engine(
+        settings, store, SimFeed(seed=3), MockTraderAgent(), CaptureNotifier(),
+        macro_source=SimMacroSource(seed=3),
+        calendar=FixedCalendar([cpi_event(utcnow())]),  # 起動時点でウィンドウ内
+        advisor=_MockAdvisor(),
+    )
+    await eng.start()
+    try:
+        assert eng.gate.halted is True  # 緊急停止状態を復元
+        assert eng.broker.cash == 777_000  # ブローカー状態を復元
+        assert "BTC_JPY" in eng.broker.positions()
+        # 再起動直後の抑制空白を作らない: ループ開始を待たず起動時に評価済み
+        assert eng.gate.restraint.mode is RestraintMode.NO_ENTRY
+        assert len(eng._tasks) == 8  # 基本 5 + macro/リスク管理/相談役
+    finally:
+        await eng.stop()
+        await store.close()
+
+
+async def test_supervised_noncritical_crash_does_not_halt(engine: Engine) -> None:
+    """表示・助言系(critical=False)の連続障害は再起動のみで、取引本体を止めない。"""
+    import asyncio as _asyncio
+
+    real_sleep = _asyncio.sleep
+
+    async def fast_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr("core.engine.asyncio.sleep", fast_sleep)
+    try:
+        async def always_broken() -> None:
+            raise RuntimeError("boom")
+
+        task = _asyncio.create_task(
+            engine._supervised("相談役(テスト)", always_broken, critical=False)
+        )
+        for _ in range(100):
+            await real_sleep(0.01)
+            if len([m for m in engine.messages if m["type"] == "halt"]) > 0:  # type: ignore[attr-defined]
+                break
+        task.cancel()
+        assert engine.gate.halted is False  # 何度落ちても緊急停止には倒さない
+    finally:
+        mp.undo()
 
 
 async def test_supervised_repeated_crashes_halt_new_entries(

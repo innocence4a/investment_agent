@@ -34,7 +34,9 @@ from core.models import (
     SYMBOLS,
     Candle,
     Kpi,
+    MacroKey,
     MacroSnapshot,
+    MacroTile,
     Symbol,
     Thought,
     Ticker,
@@ -123,28 +125,47 @@ class Engine:
             f"エージェント・コア起動({self.settings.mode.upper()} / feed={self.settings.feed}"
             f" / llm={self.settings.llm})"
         )
-        loop_fns: list[tuple[str, Callable[[], Coroutine[Any, Any, None]]]] = [
-            ("フィード消費・損切り監視", self._feed_loop),
-            ("LLM 判断サイクル", self._decision_loop),
-            ("資産スナップショット", self._equity_loop),
-            ("ローソク足永続化", self._flush_loop),
-            ("フィード死活監視", self._watchdog_loop),
+        # 起動直後の抑制空白を作らない: カレンダー由来の抑制はループ開始を待たず評価する
+        if self.calendar is not None:
+            if self.calendar.static_missing:
+                text = (
+                    f"経済指標カレンダーの静的ファイルが見つかりません({self.calendar.path})。"
+                    "FOMC・CPI 等のカレンダー連動抑制が無効の状態で稼働しています。"
+                )
+                await self._add_thought(
+                    Thought(ts=utcnow(), agent="システム", kind="system", text=text)
+                )
+                await self.notifier.send(text, level="error")
+            await self._evaluate_restraint()
+        # critical=False のループ(表示・助言系)は連続障害でも取引本体を止めない
+        loop_fns: list[tuple[str, Callable[[], Coroutine[Any, Any, None]], bool]] = [
+            ("フィード消費・損切り監視", self._feed_loop, True),
+            ("LLM 判断サイクル", self._decision_loop, True),
+            ("資産スナップショット", self._equity_loop, False),
+            ("ローソク足永続化", self._flush_loop, True),
+            ("フィード死活監視", self._watchdog_loop, True),
         ]
         if self.macro_source is not None:
-            loop_fns.append(("関連指標の取得", self._macro_loop))
+            loop_fns.append(("関連指標の取得", self._macro_loop, False))
         if self.calendar is not None:
-            loop_fns.append(("リスク管理エージェント", self._risk_agent_loop))
+            # 抑制の評価はリスクゲートに直結するためクリティカル扱い
+            loop_fns.append(("リスク管理エージェント", self._risk_agent_loop, True))
         if self.advisor is not None:
-            loop_fns.append(("相談役エージェント", self._advisor_loop))
+            loop_fns.append(("相談役エージェント", self._advisor_loop, False))
         self._tasks = [
-            asyncio.create_task(self._supervised(name, fn)) for name, fn in loop_fns
+            asyncio.create_task(self._supervised(name, fn, critical=critical))
+            for name, fn, critical in loop_fns
         ]
 
-    async def _supervised(self, name: str, fn: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    async def _supervised(
+        self, name: str, fn: Callable[[], Coroutine[Any, Any, None]], *, critical: bool = True
+    ) -> None:
         """バックグラウンドタスクの監督: 未捕捉例外を通知して再起動する。
 
         損切り監視(_feed_loop)等が単一の例外で無言停止しないための安全装置。
-        短時間に連続してクラッシュする場合は障害とみなし、新規発注停止に倒す(N-2)。
+        critical なタスクが短時間に連続クラッシュする場合は障害とみなし、
+        新規発注停止に倒す(N-2)。表示・助言系(critical=False)は再起動のみで、
+        取引本体を止めない。
         """
         failures = 0
         last_failure = 0.0
@@ -164,7 +185,7 @@ class Engine:
                     f"再起動します(直近 {failures} 回目)。",
                     level="error",
                 )
-                if failures >= 3 and not self.gate.halted:
+                if critical and failures >= 3 and not self.gate.halted:
                     await self.set_halted(True, source=f"システム(タスク「{name}」の連続障害)")
                 await asyncio.sleep(min(2.0**failures, 30.0))
 
@@ -346,8 +367,10 @@ class Engine:
                 )
                 return
             if d.action == "buy":
-                # 日次損益・取引回数は LLM 応答待ちの間に変わり得る(損切り約定等)ため、
-                # 発注直前・ロック内で必ず取り直してからゲートを通す
+                # 日次損益・取引回数・抑制状態は LLM 応答待ちの間(最大 ~90 秒)に
+                # 変わり得るため、発注直前・ロック内で必ず取り直してからゲートを通す
+                if self.calendar is not None:
+                    await self._evaluate_restraint()
                 daily_pnl, trades_today = await self._daily_stats()
                 gate = self.gate.check_entry(
                     notional_jpy=d.notional_jpy,
@@ -526,15 +549,31 @@ class Engine:
 
     # ── 関連指標(F-18) ─────────────────────────────
     async def _macro_loop(self) -> None:
-        assert self.macro_source is not None
         while True:
-            snap = await self.macro_source.fetch()
-            if snap.tiles:  # 全滅時は古いスナップショットを保持(鮮度は表示側で判断)
-                self.macro = snap
-                await self.broadcast("macro", snap.model_dump())
+            await self._macro_once()
             await asyncio.sleep(self.settings.macro_poll_sec)
 
-    def _fresh_macro(self) -> dict[str, Any]:
+    async def _macro_once(self) -> None:
+        assert self.macro_source is not None
+        try:
+            snap = await self.macro_source.fetch()
+        except Exception as e:
+            # 取得の恒常失敗が監督機構の連続障害扱いに連鎖しないよう、ここで握る
+            logger.warning("関連指標の取得に失敗: %s", e)
+            snap = MacroSnapshot()
+        if not snap.tiles:
+            return
+        # 部分的な取得失敗でフェイルオープンにしない: 新スナップショットに欠けている
+        # 指標は、鮮度内の旧値をマージして保持する(VIX が一時的に取れなかっただけで
+        # VIX 由来の抑制が解除されるのを防ぐ。鮮度切れは従来どおり除外)
+        merged = dict(self._fresh_macro())
+        merged.update(snap.tiles)
+        self.macro = MacroSnapshot(
+            tiles=merged, fetched_at=snap.fetched_at or self.macro.fetched_at
+        )
+        await self.broadcast("macro", self.macro.model_dump())
+
+    def _fresh_macro(self) -> dict[MacroKey, MacroTile]:
         """鮮度切れしていない関連指標のみを返す(古い値で判断させない)。"""
         now = utcnow()
         return {
@@ -562,9 +601,18 @@ class Engine:
 
     async def _risk_agent_loop(self) -> None:
         assert self.calendar is not None
+        last_refresh = asyncio.get_running_loop().time()
         while True:
             await self._evaluate_restraint()
             await asyncio.sleep(self.settings.risk_agent.check_interval_sec)
+            # 長期稼働でのイベント枯渇・ファイル手動更新の反映のため毎時再読込
+            now = asyncio.get_running_loop().time()
+            if now - last_refresh >= 3600:
+                last_refresh = now
+                try:
+                    self.calendar.refresh()
+                except Exception as e:
+                    logger.warning("カレンダー再読込に失敗(既存の予定を維持): %s", e)
 
     async def _evaluate_restraint(self) -> None:
         """ルール評価の結果をリスクゲートの状態に反映する(変化時のみ記録・通知)。"""
@@ -598,11 +646,15 @@ class Engine:
         assert self.advisor is not None
         # 起動時: 直近 20 時間以内にレビューが無ければ 1 回実行(再起動での取りこぼし防止)
         await asyncio.sleep(15)
-        last = await self.store.last_thought_ts("advice")
-        if last is None or (utcnow() - last).total_seconds() > 20 * 3600:
-            await self._run_advisor()
+        await self._run_advisor_if_due(min_gap_hours=20)
         while True:
             await asyncio.sleep(self._seconds_until_advisor_hour())
+            # 起動時キャッチアップと定時実行が同じ朝に二重実行にならないようガード
+            await self._run_advisor_if_due(min_gap_hours=6)
+
+    async def _run_advisor_if_due(self, *, min_gap_hours: float) -> None:
+        last = await self.store.last_thought_ts("advice")
+        if last is None or (utcnow() - last).total_seconds() > min_gap_hours * 3600:
             await self._run_advisor()
 
     def _seconds_until_advisor_hour(self) -> float:

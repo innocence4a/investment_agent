@@ -43,8 +43,9 @@ def evaluate(
         )
         if ev.importance == "hi":
             no_entry.append(text)
-        else:
+        elif ev.importance == "mid":
             size_half.append(text)
+        # lo は表示のみで抑制しない(要件定義書 v0.7.1 §11)
 
     if inputs.vix is not None:
         if inputs.vix >= cfg.vix_no_entry:
