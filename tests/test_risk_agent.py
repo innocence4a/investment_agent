@@ -41,6 +41,12 @@ def test_mid_event_window_triggers_size_half() -> None:
     assert state.mode is RestraintMode.SIZE_HALF
 
 
+def test_lo_event_window_does_not_restrain() -> None:
+    # 低インパクトは表示のみで抑制しない(v0.7.1 §11)
+    state = evaluate(RiskInputs(active_events=[event("lo")]), RISK, CFG)
+    assert state.mode is RestraintMode.NONE
+
+
 def test_vix_boundaries() -> None:
     assert evaluate(RiskInputs(vix=24.9), RISK, CFG).mode is RestraintMode.NONE
     assert evaluate(RiskInputs(vix=25.0), RISK, CFG).mode is RestraintMode.SIZE_HALF

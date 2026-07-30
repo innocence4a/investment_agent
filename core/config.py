@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -75,7 +75,8 @@ class Settings(BaseSettings):
     # 経済指標カレンダー(F-19): 空なら同梱の core/data/economic_calendar.json
     calendar_path: str = ""
     # 相談役(F-21): 日次レビューの実行時刻(JST)とモデル
-    advisor_hour_jst: int = 7
+    # 範囲外の値は起動時にエラーにする(不正値で advisor ループが連続クラッシュしない)
+    advisor_hour_jst: int = Field(default=7, ge=0, le=23)
     advisor_model: str = "claude-sonnet-5"
 
     risk_agent: RiskAgentConfig = RiskAgentConfig()

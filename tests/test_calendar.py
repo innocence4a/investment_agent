@@ -21,13 +21,72 @@ def test_first_friday() -> None:
 def test_nfp_rule_generation_with_dst() -> None:
     events = nfp_events(ts("2026-07-01 00:00:00"), months=6)
     assert len(events) == 6
-    # 夏時間(7月)は 12:30 UTC、冬時間(11月)は 13:30 UTC
+    # 8:30 ET = 夏時間 12:30 UTC / 冬時間 13:30 UTC(zoneinfo で正確に解決)
     jul = next(e for e in events if e.id == "nfp-2026-07")
     nov = next(e for e in events if e.id == "nfp-2026-11")
-    assert (jul.ts.hour, jul.ts.minute) == (12, 30)
+    assert (jul.ts.hour, jul.ts.minute) == (12, 30)  # 7/3 は夏時間
+    # 2026-11-06: DST は 11/1(第1日曜)に終了済み → 冬時間 13:30 UTC
     assert (nov.ts.hour, nov.ts.minute) == (13, 30)
     assert jul.importance == "hi"
     assert jul.window_before_min == 30
+
+
+def test_nfp_november_during_dst_edge_year() -> None:
+    # 2030-11-01 は金曜かつ DST 終了(11/3 第1日曜)前 → 夏時間 12:30 UTC。
+    # 月単位の近似だと 13:30 になり、±30 分ウィンドウが実発表(12:30)を外れる回帰ケース
+    events = nfp_events(ts("2030-11-01 00:00:00"), months=1)
+    nov = events[0]
+    assert nov.ts == ts("2030-11-01 12:30:00")
+
+
+def test_default_calendar_ships_with_hi_impact_static_events() -> None:
+    """同梱カレンダーの存在保証(.gitignore 誤マッチでの欠落を CI で検知する)。"""
+    from core.calendar import DEFAULT_CALENDAR_PATH
+
+    assert DEFAULT_CALENDAR_PATH.exists(), (
+        f"{DEFAULT_CALENDAR_PATH} がリポジトリに存在しません(.gitignore を確認)"
+    )
+    static = load_static_events(DEFAULT_CALENDAR_PATH)
+    assert any(e.id.startswith("fomc-") and e.importance == "hi" for e in static)
+    assert any(e.id.startswith("cpi-") for e in static)
+    cal = EconomicCalendar()
+    assert cal.static_missing is False
+
+
+def test_naive_ts_is_rejected(tmp_path: Path) -> None:
+    """tzinfo の無い ts は読み飛ばす(ローカル TZ 解釈でサイレントに最大 9 時間ずれるため)。"""
+    path = tmp_path / "cal.json"
+    path.write_text(json.dumps({
+        "events": [
+            {"id": "naive", "label": "naive 時刻", "importance": "hi",
+             "ts": "2026-08-12T12:30:00", "window_before_min": 30, "window_after_min": 30},
+            {"id": "aware", "label": "正しい時刻", "importance": "hi",
+             "ts": "2026-08-12T12:30:00+00:00", "window_before_min": 30,
+             "window_after_min": 30},
+        ]
+    }), encoding="utf-8")
+    events = load_static_events(path)
+    assert [e.id for e in events] == ["aware"]
+
+
+def test_refresh_reflects_file_changes(tmp_path: Path) -> None:
+    path = tmp_path / "cal.json"
+    path.write_text(json.dumps({"events": []}), encoding="utf-8")
+    cal = EconomicCalendar(path, now=ts("2026-07-01 00:00:00"))
+    assert not any(e.id == "added" for e in cal.events)
+    path.write_text(json.dumps({
+        "events": [{"id": "added", "label": "追加イベント", "importance": "hi",
+                    "ts": "2026-08-12T12:30:00+00:00", "window_before_min": 30,
+                    "window_after_min": 30}]
+    }), encoding="utf-8")
+    cal.refresh(now=ts("2026-07-01 00:00:00"))
+    assert any(e.id == "added" for e in cal.events)
+
+
+def test_missing_default_file_sets_static_missing(tmp_path: Path) -> None:
+    cal = EconomicCalendar(tmp_path / "not-exists.json", now=ts("2026-07-01 00:00:00"))
+    assert cal.static_missing is True
+    assert any(e.id.startswith("nfp-") for e in cal.events)  # ルール生成は生きている
 
 
 def test_window_active_boundaries() -> None:
